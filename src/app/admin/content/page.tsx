@@ -2,16 +2,26 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import {
-  Box,
-  Stack,
-  Heading,
-  Text,
-  Button,
-  Grid,
-  Badge,
-  Spinner
-} from '@chakra-ui/react';
+import React from 'react';
+
+// Simple component replacements for Chakra UI
+const Box = ({ children, ...props }: any) => <div {...props}>{children}</div>;
+const Stack = ({ children, direction = 'column', gap = 4, ...props }: any) => (
+  <div style={{ display: 'flex', flexDirection: direction, gap: `${gap * 0.25}rem`, ...props.style }} {...props}>{children}</div>
+);
+const Heading = ({ children, size = 'md', ...props }: any) => {
+  const sizes = { lg: '1.75rem', md: '1.25rem', sm: '1rem' };
+  return <h2 style={{ fontSize: sizes[size as keyof typeof sizes], fontWeight: 'bold', ...props.style }} {...props}>{children}</h2>;
+};
+const Text = ({ children, ...props }: any) => <p {...props}>{children}</p>;
+const Button = ({ children, loading = false, ...props }: any) => (
+  <button disabled={loading} {...props}>{loading ? 'Loading...' : children}</button>
+);
+const Grid = ({ children, ...props }: any) => <div style={{ display: 'grid', ...props.style }} {...props}>{children}</div>;
+const Badge = ({ children, ...props }: any) => (
+  <span style={{ padding: '0.25rem 0.5rem', borderRadius: '0.25rem', fontSize: '0.75rem', backgroundColor: '#e5e7eb', ...props.style }} {...props}>{children}</span>
+);
+const Spinner = () => <div>Loading...</div>;
 import { createClientSideClient } from '@/lib/supabase';
 
 // Supabase client
