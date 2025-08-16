@@ -4,25 +4,18 @@
 import { useState, useEffect } from 'react';
 import {
   Box,
-  VStack,
-  HStack,
+  Stack,
   Heading,
   Text,
   Button,
   Grid,
   Badge,
-  Spinner,
-  Alert,
-  AlertIcon,
-  useToast
+  Spinner
 } from '@chakra-ui/react';
-import { createClient } from '@supabase/supabase-js';
+import { createClientSideClient } from '@/lib/supabase';
 
 // Supabase client
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+const supabase = createClientSideClient();
 
 interface Framework {
   id: string;
@@ -33,15 +26,17 @@ interface Framework {
   required_tier: string;
   cognitive_depth_score: number;
   pattern_complexity: number;
-  base_price_cents: number;
+  price_cents: number;
   created_at: string;
+  view_count: number;
+  download_count: number;
 }
 
 export default function AdminContentPage() {
   const [frameworks, setFrameworks] = useState<Framework[]>([]);
   const [loading, setLoading] = useState(true);
   const [deploying, setDeploying] = useState(false);
-  const toast = useToast();
+
 
   // Load frameworks from database
   useEffect(() => {
@@ -51,7 +46,7 @@ export default function AdminContentPage() {
   const loadFrameworks = async () => {
     try {
       const { data, error } = await supabase
-        .from('cognitive_frameworks')
+        .from('prompts')
         .select('*')
         .order('created_at', { ascending: false });
 
@@ -59,13 +54,7 @@ export default function AdminContentPage() {
       
       setFrameworks(data || []);
     } catch (error: any) {
-      toast({
-        title: 'Error loading frameworks',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
+      console.error('Error loading frameworks:', error.message);
     } finally {
       setLoading(false);
     }
@@ -85,25 +74,13 @@ export default function AdminContentPage() {
       });
 
       if (response.ok) {
-        toast({
-          title: 'Success!',
-          description: '25 new frameworks generated',
-          status: 'success',
-          duration: 3000,
-          isClosable: true,
-        });
+        console.log('Success! 25 new frameworks generated');
         loadFrameworks(); // Reload list
       } else {
         throw new Error('Generation failed');
       }
     } catch (error) {
-      toast({
-        title: 'Generation Error',
-        description: 'Could not generate new frameworks',
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
+      console.error('Generation Error: Could not generate new frameworks');
     } finally {
       setDeploying(false);
     }
@@ -119,7 +96,7 @@ export default function AdminContentPage() {
 
   return (
     <Box p={8} maxW="7xl" mx="auto">
-      <VStack spacing={8} align="stretch">
+      <Stack gap={8}>
         
         {/* Header */}
         <Box>
@@ -132,7 +109,7 @@ export default function AdminContentPage() {
         </Box>
 
         {/* Stats */}
-        <HStack spacing={6}>
+        <Stack direction="row" gap={6}>
           <Box bg="white" p={4} borderRadius="lg" borderWidth="1px" borderColor="#e2e8f0">
             <Text fontSize="2xl" fontWeight="bold" color="#1f2937">
               {frameworks.length}
@@ -142,7 +119,7 @@ export default function AdminContentPage() {
           
           <Box bg="white" p={4} borderRadius="lg" borderWidth="1px" borderColor="#e2e8f0">
             <Text fontSize="2xl" fontWeight="bold" color="#059669">
-              €{Math.round(frameworks.reduce((sum, f) => sum + f.base_price_cents, 0) / 100).toLocaleString()}
+              €{Math.round(frameworks.reduce((sum, f) => sum + f.price_cents, 0) / 100).toLocaleString()}
             </Text>
             <Text fontSize="sm" color="#64748b">Total Value</Text>
           </Box>
@@ -153,18 +130,18 @@ export default function AdminContentPage() {
             </Text>
             <Text fontSize="sm" color="#64748b">Expert Level</Text>
           </Box>
-        </HStack>
+        </Stack>
 
         {/* Actions */}
-        <HStack spacing={4}>
+        <Stack direction="row" gap={4}>
           <Button
             onClick={generateMoreFrameworks}
             bg="#6366f1"
             color="white"
             size="lg"
-            isLoading={deploying}
+            loading={deploying}
             loadingText="Generating..."
-            _hover={{ bg: "#4f46e5" }}
+            _hover={{ backgroundColor: "#4f46e5" }}
           >
             Generate 25 More Frameworks
           </Button>
@@ -177,7 +154,7 @@ export default function AdminContentPage() {
           >
             Refresh List
           </Button>
-        </HStack>
+        </Stack>
 
         {/* Framework Grid */}
         {frameworks.length > 0 ? (
@@ -193,12 +170,12 @@ export default function AdminContentPage() {
                 _hover={{ shadow: "md", borderColor: "#6366f1" }}
                 transition="all 0.2s"
               >
-                <VStack align="start" spacing={3}>
-                  <Heading size="sm" color="#374151" noOfLines={2}>
+                <Stack gap={3}>
+                  <Heading size="sm" color="#374151" textOverflow="ellipsis" overflow="hidden" whiteSpace="nowrap">
                     {framework.title}
                   </Heading>
                   
-                  <HStack spacing={2} flexWrap="wrap">
+                  <Stack direction="row" gap={2} flexWrap="wrap">
                     <Badge 
                       bg={framework.difficulty_tier === 'expert' ? "#dc2626" : 
                           framework.difficulty_tier === 'advanced' ? "#ea580c" : "#059669"} 
@@ -210,9 +187,9 @@ export default function AdminContentPage() {
                       {framework.cognitive_category}
                     </Badge>
                     <Badge variant="outline" colorScheme="purple">
-                      €{Math.round(framework.base_price_cents / 100)}
+                      €{Math.round(framework.price_cents / 100)}
                     </Badge>
-                  </HStack>
+                  </Stack>
                   
                   <Text fontSize="xs" color="#64748b">
                     Depth: {framework.cognitive_depth_score}/10 | 
@@ -222,17 +199,16 @@ export default function AdminContentPage() {
                   <Text fontSize="xs" color="#9ca3af">
                     Created: {new Date(framework.created_at).toLocaleDateString()}
                   </Text>
-                </VStack>
+                </Stack>
               </Box>
             ))}
           </Grid>
         ) : (
-          <Alert status="info">
-            <AlertIcon />
-            No frameworks found. Click "Generate" to create some.
-          </Alert>
+          <Box p={4} bg="blue.50" borderRadius="md" borderWidth="1px" borderColor="blue.200">
+            <Text color="blue.700">No frameworks found. Click "Generate" to create some.</Text>
+          </Box>
         )}
-      </VStack>
+      </Stack>
     </Box>
   );
 }
