@@ -1,0 +1,1684 @@
+
+
+
+
+
+
+10) Observabilitate joburi cron — audit determinist pentru fiecare rulare
+
+Țintă: scrie tabel job_audit + wrappers pentru joburile deja programate cu pg_cron, care loghează rezultatul sau eroarea pentru:
+refresh_tier_access_pool_all (pool 10/40/70/100), check_library_cap_and_alert (cap 9.974€), check_preview_privileges_and_alert (leak privilegii). Programările și funcțiile există deja; adaugi audit trail și schimbi comanda din cron să apeleze wrapper-ele. 
+ 
+
+A) DDL — tabelul de audit (minim, strict)
+
+Fișier: 32_cron_observability.sql
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 1) Tabel audit
+CREATE TABLE IF NOT EXISTS public.job_audit (
+  id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_name   text        NOT NULL,
+  ok         boolean     NOT NULL,
+  payload    jsonb       NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_job_name_nonempty CHECK (length(btrim(job_name)) > 0)
+);
+
+-- 2) Indici pentru interogări operative
+CREATE INDEX IF NOT EXISTS idx_job_audit_job_ts ON public.job_audit(job_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_audit_ts     ON public.job_audit(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_audit_ok_ts  ON public.job_audit(ok, created_at DESC);
+
+-- 3) RLS: doar admin poate citi (admin definit în §2 → f_is_admin())
+ALTER TABLE public.job_audit ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.job_audit FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.job_audit TO authenticated;
+
+DROP POLICY IF EXISTS job_audit_admin_select ON public.job_audit;
+CREATE POLICY job_audit_admin_select
+ON public.job_audit FOR SELECT
+TO authenticated
+USING (public.f_is_admin()); -- helper deja introdus pentru /studio
+
+B) Helper — inserare audit (intern)
+-- Funcție internă: inserează un rând în job_audit
+CREATE OR REPLACE FUNCTION public.f_job_audit(p_job text, p_ok boolean, p_payload jsonb DEFAULT '{}'::jsonb)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+AS $$
+  INSERT INTO public.job_audit(job_name, ok, payload)
+  VALUES (p_job, p_ok, COALESCE(p_payload, '{}'::jsonb));
+$$;
+
+-- Nu expune public; nu e nevoie de GRANT explicit.
+REVOKE ALL ON FUNCTION public.f_job_audit(text, boolean, jsonb) FROM PUBLIC, anon, authenticated;
+
+C) Wrappers cron — rulează jobul, loghează rezultat/eroare
+
+Joburile originale:
+• Pool: refresh_tier_access_pool_all(CURRENT_DATE) (zilnic 03:00, determinist 24h). 
+
+• Cap: check_library_cap_and_alert() (zilnic 03:05). 
+
+• Privilegii: check_preview_privileges_and_alert() (zilnic 03:12). 
+
+-- 1) Pool 10/40/70/100 – agregă în payload pentru toate tier-urile
+CREATE OR REPLACE FUNCTION public.f_cron_run_refresh_tier_access_pool_all()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  p jsonb;
+BEGIN
+  p := (
+    SELECT jsonb_build_object(
+      'date', CURRENT_DATE,
+      'results', COALESCE(
+        jsonb_agg(jsonb_build_object(
+          'tier', tier,
+          'selected', selected_count,
+          'target', target_count
+        )), '[]'::jsonb)
+    )
+    FROM public.refresh_tier_access_pool_all(CURRENT_DATE)
+  );
+
+  PERFORM public.f_job_audit('refresh_tier_access_pool_all', TRUE, p);
+  RETURN p;
+
+EXCEPTION WHEN OTHERS THEN
+  PERFORM public.f_job_audit('refresh_tier_access_pool_all', FALSE,
+         jsonb_build_object('error', SQLERRM, 'date', CURRENT_DATE));
+  RAISE;
+END
+$$;
+
+-- 2) Cap 9.974€ – marchează exceeded / total / cap
+CREATE OR REPLACE FUNCTION public.f_cron_run_check_library_cap()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  p jsonb;
+BEGIN
+  p := (
+    SELECT jsonb_build_object(
+      'exceeded', exceeded,
+      'total_eur', total_eur,
+      'cap_eur', cap_eur,
+      'at', now()
+    )
+    FROM public.check_library_cap_and_alert()
+    LIMIT 1
+  );
+
+  PERFORM public.f_job_audit('check_library_cap', TRUE, p);
+  RETURN p;
+
+EXCEPTION WHEN OTHERS THEN
+  PERFORM public.f_job_audit('check_library_cap', FALSE, jsonb_build_object('error', SQLERRM, 'at', now()));
+  RAISE;
+END
+$$;
+
+-- 3) Audit privilegii preview/full – număr de violări (0 = OK)
+CREATE OR REPLACE FUNCTION public.f_cron_run_preview_privileges_audit()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_count bigint;
+  p jsonb;
+BEGIN
+  SELECT COUNT(*) INTO v_count FROM public.check_preview_privileges_and_alert();
+
+  p := jsonb_build_object('violations', v_count, 'at', now());
+
+  PERFORM public.f_job_audit('preview_privileges_audit', (v_count = 0), p);
+  RETURN p;
+
+EXCEPTION WHEN OTHERS THEN
+  PERFORM public.f_job_audit('preview_privileges_audit', FALSE, jsonb_build_object('error', SQLERRM, 'at', now()));
+  RAISE;
+END
+$$;
+
+D) pg_cron — schimbă comanda să apeleze wrappers (nu direct funcțiile)
+
+Păstrează aceleași ferestre orare (Europe/Chisinau), doar înlocuiește comanda ca să scrie în job_audit. 
+ 
+
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+-- (Re)programează joburile existente să apeleze wrappers
+-- 1) Pool daily – 03:00
+SELECT cron.schedule(
+  jobname  => 'refresh_tier_access_pool_daily',
+  schedule => 'TZ=Europe/Chisinau 0 3 * * *',
+  command  => $$SELECT public.f_cron_run_refresh_tier_access_pool_all();$$
+);
+
+-- 2) Cap daily – 03:05
+SELECT cron.schedule(
+  jobname  => 'check_library_cap_daily',
+  schedule => 'TZ=Europe/Chisinau 5 3 * * *',
+  command  => $$SELECT public.f_cron_run_check_library_cap();$$
+);
+
+-- 3) Privileges audit – 03:12
+SELECT cron.schedule(
+  jobname  => 'preview_privileges_audit_daily',
+  schedule => 'TZ=Europe/Chisinau 12 3 * * *',
+  command  => $$SELECT public.f_cron_run_preview_privileges_audit();$$
+);
+
+
+Notă: în fișierele anterioare unele comenzi rulau direct funcțiile; wrapper-ele de mai sus păstrează logica, dar adaugă audit. Dacă joburile există deja, reasignează-le cu aceeași jobname (sau folosește cron.unschedule(job_id) înainte, conform versiunii pg_cron din cluster).
+
+E) Smoke‑tests (SQL)
+-- Rulează manual wrapper-ele
+SELECT public.f_cron_run_refresh_tier_access_pool_all();
+SELECT public.f_cron_run_check_library_cap();
+SELECT public.f_cron_run_preview_privileges_audit();
+
+-- Verifică auditul (vizibil doar pentru admin prin RLS)
+SELECT job_name, ok, payload, created_at
+FROM public.job_audit
+ORDER BY created_at DESC
+LIMIT 20;
+
+F) Integrare /studio
+
+Listă /studio/alerts poate trage și din job_audit pentru status verde/roșu pe ultimele rulări.
+
+payload este JSON compact: îl afișezi ca detaliu (ex: violations, selected/target, exceeded).
+
+Nu deschide job_audit la public — RLS e deja admin‑only.
+
+Verdict simbolic
+
+Fă timpul vizibil: fiecare cron lasă o urmă scurtă și rece — istorie executabilă.
+
+
+
+
+
+11) Views publice pentru monetizare — surse curate pentru /bundles și /pricing
+
+Expune doar ce trebuie pe public: bundles cu items (neuroni publicați), și plans cu prețuri. Blochează tabelele brute; front‑endul citește exclusiv views. 
+ 
+
+A) Migrare — 33_public_views_monetization.sql (idempotent)
+-- 33_public_views_monetization.sql
+-- Depinde de:
+--  • bundles + bundle_neurons + neurons (schema existentă)  ──> :contentReference[oaicite:2]{index=2}
+--  • v_neuron_public (preview doar published=true)            ──> :contentReference[oaicite:3]{index=3}
+--  • plans (code/name/percent/monthly/annual)                 ──> :contentReference[oaicite:4]{index=4}
+
+-- 1) VIEW: v_bundle_public
+--    – include NUMAI neuroni publicați (via v_neuron_public)
+--    – items = JSONB cu previewurile care pot fi afișate public
+CREATE OR REPLACE VIEW public.v_bundle_public AS
+SELECT
+  b.id,
+  b.slug,
+  b.title,
+  b.description,
+  b.price_cents,                    -- preț bundle (root=2 impus în triggere)  :contentReference[oaicite:5]{index=5}
+  b.required_tier,
+  COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'id',    np.id,
+        'slug',  np.slug,
+        'title', np.title,
+        'summary', np.summary,
+        'required_tier', np.required_tier,
+        'price_cents',   np.price_cents
+      )
+      ORDER BY np.title ASC
+    ) FILTER (WHERE np.id IS NOT NULL),
+    '[]'::jsonb
+  ) AS items,
+  COUNT(np.id) AS item_count
+FROM public.bundles b
+LEFT JOIN public.bundle_neurons bn   ON bn.bundle_id = b.id
+LEFT JOIN public.v_neuron_public np  ON np.id = bn.neuron_id  -- doar neuroni published=true  :contentReference[oaicite:6]{index=6}
+GROUP BY b.id, b.slug, b.title, b.description, b.price_cents, b.required_tier;
+
+-- 2) VIEW: v_plans_public
+--    – cod, nume, procent acces, prețuri (centi) — gata de /pricing
+CREATE OR REPLACE VIEW public.v_plans_public AS
+SELECT
+  p.code,                 -- 'free'|'architect'|'initiate'|'elite'
+  p.name,
+  p.percent_access AS percent,
+  p.monthly_price_cents  AS monthly,
+  p.annual_price_cents   AS annual
+FROM public.plans p;
+
+-- 3) GRANTS pe views + REVOKE pe tabele brute (public surface = views)
+REVOKE ALL ON public.bundles FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.plans   FROM PUBLIC, anon, authenticated;
+
+GRANT SELECT ON public.v_bundle_public TO anon, authenticated;
+GRANT SELECT ON public.v_plans_public  TO anon, authenticated;
+
+
+De ce în felul ăsta
+
+v_bundle_public agregă items doar din v_neuron_public ⇒ niciun leak de content_full; doar neuroni published=true apar la public. 
+
+v_plans_public mapează direct plans (codificat deja cu 10/40/70/100 și root‑2 pe prețuri). 
+
+B) Contracte FE (minim, stabile)
+
+/bundles (list + card): SELECT slug, title, description, price_cents, item_count FROM v_bundle_public ORDER BY title;
+
+/bundles/:slug (detail): SELECT * FROM v_bundle_public WHERE slug = :slug;
+– items[*] are exact preview‑urile safe (id, slug, title, summary, required_tier, price_cents).
+
+/pricing: SELECT code, name, percent, monthly, annual FROM v_plans_public ORDER BY code;
+
+C) Smoke‑tests (copy/paste)
+-- 1) Bundles publice (fără leak de conținut)
+SELECT slug, title, price_cents, item_count
+FROM public.v_bundle_public
+ORDER BY title
+LIMIT 10;
+
+-- 2) Bundle detail + items preview (JSON)
+SELECT title, items
+FROM public.v_bundle_public
+WHERE slug = 'starter-pack';  -- exemplu
+
+-- 3) Pricing public
+SELECT code, name, percent, monthly, annual
+FROM public.v_plans_public;
+
+-- 4) Verifică că tabelele brute nu pot fi citite de clienți
+-- SET ROLE anon;  -- în CI
+-- SELECT * FROM public.bundles;  -- PERMISSION DENIED (așa trebuie)
+-- SELECT * FROM public.plans;    -- PERMISSION DENIED
+
+D) Aliniere cu schema existentă
+
+bundles / bundle_neurons — câmpuri & root‑2 pe preț validat în trigger: reutilizate ca sursă sigură pentru view. 
+
+v_neuron_public — preview doar pentru published=true (title, summary, tier, price_cents). Folosit ca filtru implicit pentru items. 
+
+plans — code/name/percent_access/monthly_price_cents/annual_price_cents deja definite cu check‑uri și triggere. 
+
+Verdict simbolic
+
+Monetizează curat: vitrină prin views, seif prin tabele.
+
+
+
+
+
+12) „Free = 10% FULL” — finalizează în f_has_full_access (inclusiv fallback „no sub → free”)
+
+Decizie executabilă: dă acces FULL la 10% din neuroni cu required_tier='free' pentru userii fără abonament activ (plan = free), prin tier_access_pool. Menține restul regulilor neschimbate: entitlement OR elite OR pool@plan. rpc_get_neuron_full rămâne sursa unică de livrare FULL. 
+ 
+
+A) Migrare — 34_access_free_pool.sql (idempotent)
+
+Ce fixezi clar: 1) definești „plan efectiv” (active sau free dacă nu există sub); 2) extinzi condiția „pool@plan” la ('free','architect','initiate'); 3) nu atingi logica pentru elite și entitlements. 
+
+-- 34_access_free_pool.sql
+
+-- 1) PLAN EFECTIV: activ sau 'free' dacă nu există subs activă
+CREATE OR REPLACE FUNCTION public.f_user_effective_plan(p_user uuid)
+RETURNS plan_tier
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT COALESCE(public.f_user_active_plan(p_user), 'free'::plan_tier)
+$$;
+
+-- 2) ACCESS DECISION (OR) — include 'free' în condiția cu pool
+CREATE OR REPLACE FUNCTION public.f_has_full_access(p_user uuid, p_neuron uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+  WITH ap AS (
+    SELECT public.f_user_effective_plan(p_user) AS plan
+  )
+  SELECT
+    -- (1) entitlement materializat (single/bundle/subscription)
+    EXISTS (
+      SELECT 1
+      FROM public.user_entitlements ue
+      WHERE ue.user_id = p_user AND ue.neuron_id = p_neuron
+    )
+    OR
+    -- (2) plan = 'elite' (FULL global)
+    EXISTS (SELECT 1 FROM ap WHERE plan = 'elite')
+    OR
+    -- (3) plan ∈ {'free','architect','initiate'} ȘI neuronul e în pool pentru acel plan (astăzi)
+    EXISTS (
+      SELECT 1
+      FROM ap
+      JOIN public.tier_access_pool tap
+        ON tap.neuron_id = p_neuron
+       AND tap.tier     = ap.plan
+       AND tap.in_pool  = TRUE
+      WHERE ap.plan IN ('free','architect','initiate')
+    )
+$$;
+
+-- helper pentru contexte Supabase (auth.uid())
+CREATE OR REPLACE FUNCTION public.f_has_full_access_current_user(p_neuron uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT public.f_has_full_access(auth.uid(), p_neuron)
+$$;
+
+
+De ce așa:
+– f_user_effective_plan tratează „fără subs” = free (altfel NULL ar fi exclus din pool). 
+
+– tier_access_pool deja selectează exact 10/40/70/100% pe fiecare plan, inclusiv free (eligibili = neuroni published cu required_tier ≤ plan). Compararea ENUM‑urilor păstrează ordinea 'free' < 'architect' < 'initiate' < 'elite'. 
+
+B) Contracte care rămân nemodificate (aliniere)
+
+rpc_get_neuron_full(neuron_id) verifică f_has_full_access(auth.uid(), …) și livrează doar dacă regula e TRUE; loghează în user_analytics + watermark. Nu expune content_full prin SELECT. 
+
+Views publice (v_neuron_public, v_bundle_public, v_plans_public) rămân doar pentru preview & pricing. 
+
+Poolul zilnic (refresh_tier_access_pool_all) continuă să calculeze 10% pentru free, 40%/70% pentru architect/initiate, 100% pentru elite (informativ; elite oricum are FULL global). 
+
+C) Teste — sanitate și edge‑cases (copy/paste)
+-- Seed minimal: un user fără subs active (efectiv 'free')
+-- Presupune: neuron N1 cu required_tier='free', published=true, aflat azi în pool('free')
+
+-- 1) Fără entitlement, fără subs → FREE trebuie să aibă FULL pe neuron în pool('free')
+SELECT public.f_has_full_access('00000000-0000-0000-0000-0000000000AA',
+                                '11111111-1111-1111-1111-111111111111') AS free_pool_full;
+
+-- 2) Fără entitlement, N1 NU este în pool('free') azi → FALSE
+-- (alege un neuron 'free' care nu e în pool curent)
+SELECT public.f_has_full_access('00000000-0000-0000-0000-0000000000AA',
+                                '11111111-1111-1111-1111-1111111111BB') AS free_not_in_pool;
+
+-- 3) Architect/Initiate — în continuare funcționează identic
+SELECT public.f_has_full_access('00000000-0000-0000-0000-0000000000AB',
+                                '11111111-1111-1111-1111-111111111111') AS paid_pool_full;
+
+-- 4) Elite — TRUE indiferent de pool
+SELECT public.f_has_full_access('00000000-0000-0000-0000-0000000000AC',
+                                '11111111-1111-1111-1111-1111111111CC') AS elite_full;
+
+-- 5) Entitlement — TRUE pentru orice plan
+INSERT INTO public.user_entitlements(user_id, neuron_id, source)
+VALUES ('00000000-0000-0000-0000-0000000000AA', '11111111-1111-1111-1111-1111111111DD', 'single')
+ON CONFLICT DO NOTHING;
+
+SELECT public.f_has_full_access('00000000-0000-0000-0000-0000000000AA',
+                                '11111111-1111-1111-1111-1111111111DD') AS entitlement_full;
+
+D) UX/Comercial — documentează în /pricing
+
+Clarifică în UI:
+Free = „FULL pe 10% din neuroni free-tier, rotați zilnic prin pool (24h).”
+Architect/Initiate = FULL pe 40%/70% (pool determinist 24h).
+Elite = 100% + bonusuri exclusive.
+Sursa de adevăr pentru UI: v_plans_public + un call la v_pool_targets (dacă vrei să expui „câți neuroni sunt azi în pool” per plan). 
+ 
+
+E) Observabilitate — nu uita de conformitatea poolului
+
+Regula de „exact 10/40/70/100%” e deja verificată prin vederile/cronul de conformitate (pool gating). Dacă n‑ai inclus free în verificare, include‑l (dar în fișiere este deja pentru toate tier‑urile). 
+
+Verdict simbolic
+
+Free devine o mostră cu mușcătură: 10% FULL, zilnic, cu semnătură legală la livrare.
+
+
+
+
+
+
+
+13) RPC helperi pentru FE — fără SELECT direct, viteze de producție
+
+Scope executabil: căutare publică (TSV), plan activ, entitlements materiale. Contracte curate pentru /search, /account, /n/:slug. Aliniat RLS + livrare full via RPC. 
+
+A) Precondiții (asumate)
+
+unaccent activ, coloană neurons.tsv GENERATED (unaccent, simple) + GIN. 
+
+Planul activ derivat din user_subscriptions (o singură activă/user). 
+
+Entitlements mintuite din purchases/bundles; receipts append‑only (audit).
+
+FE rute folosesc RPC‑uri (evită SELECT pe tabele) — see /search, /account/*. 
+
+B) rpc_search_neurons(q, limit, offset) — FTS public, doar preview
+
+Returnează doar câmpuri publice; caută în title+summary cu unaccent, ordonează pe ts_rank_cd. Anon permis (preview only). 
+
+-- 35_rpc_helpers.sql
+CREATE EXTENSION IF NOT EXISTS unaccent;
+
+CREATE OR REPLACE FUNCTION public.rpc_search_neurons(
+  p_q      text,
+  p_limit  int DEFAULT 20,
+  p_offset int DEFAULT 0
+) RETURNS TABLE (
+  id uuid,
+  slug text,
+  title text,
+  summary text,
+  required_tier plan_tier,
+  price_cents int,
+  rank real
+)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_q text := btrim(coalesce(p_q,''));
+  v_ts tsquery;
+  v_limit int := GREATEST(1, LEAST(coalesce(p_limit,20), 100));
+  v_offset int := GREATEST(0, coalesce(p_offset,0));
+BEGIN
+  -- fallback: fără query -> cele mai noi publicate
+  IF v_q = '' THEN
+    RETURN QUERY
+    SELECT n.id, n.slug, n.title, n.summary, n.required_tier, n.price_cents,
+           0::real AS rank
+    FROM public.neurons n
+    WHERE n.published = TRUE
+    ORDER BY n.created_at DESC
+    LIMIT v_limit OFFSET v_offset;
+    RETURN;
+  END IF;
+
+  v_ts := plainto_tsquery('simple', unaccent(v_q));
+
+  -- Notă: selectăm numai coloanele de preview; content_full nu iese niciodată
+  RETURN QUERY
+  SELECT n.id, n.slug, n.title, n.summary, n.required_tier, n.price_cents,
+         ts_rank_cd(n.tsv, v_ts)::real AS rank
+  FROM public.neurons n
+  WHERE n.published = TRUE
+    AND n.tsv @@ v_ts
+  ORDER BY rank DESC, n.created_at DESC
+  LIMIT v_limit OFFSET v_offset;
+END
+$$;
+
+-- GRANTS: public (preview) OK
+REVOKE ALL ON FUNCTION public.rpc_search_neurons(text,int,int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.rpc_search_neurons(text,int,int) TO anon, authenticated;
+
+C) rpc_get_my_active_plan() — plan efectiv (fallback free)
+
+Derivat din user_subscriptions; dacă nu există activă ⇒ free. Expune percent & eticheta pentru UI /pricing & /account. 
+
+-- helper consolidat (dacă nu e deja în DB)
+CREATE OR REPLACE FUNCTION public.f_user_effective_plan(p_user uuid)
+RETURNS plan_tier
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT COALESCE(public.f_user_active_plan(p_user), 'free'::plan_tier)
+$$;
+
+-- RPC: planul meu activ (sau 'free' dacă nu am subs)
+CREATE OR REPLACE FUNCTION public.rpc_get_my_active_plan()
+RETURNS TABLE (
+  plan plan_tier,
+  percent int,
+  label text
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT
+    public.f_user_effective_plan(auth.uid())                           AS plan,
+    public.f_plan_percent_access(public.f_user_effective_plan(auth.uid())) AS percent,
+    public.f_plan_display_name(public.f_user_effective_plan(auth.uid()))   AS label
+$$;
+
+REVOKE ALL ON FUNCTION public.rpc_get_my_active_plan() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_get_my_active_plan() TO authenticated;
+
+
+Notă: f_user_active_plan() este deja definit pe baza user_subscriptions (max 1 activă/user prin index parțial). 
+
+D) rpc_list_my_entitlements() — neuroni deținuți (materializați)
+
+Listează ceea ce deții din user_entitlements (single/bundle/subscription), cu metadate de listare pentru /account/entitlements. 
+
+CREATE OR REPLACE FUNCTION public.rpc_list_my_entitlements()
+RETURNS TABLE (
+  neuron_id uuid,
+  slug text,
+  title text,
+  required_tier plan_tier,
+  price_cents int,
+  source entitlement_source,
+  granted_at timestamptz,
+  published boolean
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT
+    ue.neuron_id,
+    n.slug,
+    n.title,
+    n.required_tier,
+    n.price_cents,
+    ue.source,
+    ue.granted_at,
+    n.published
+  FROM public.user_entitlements ue
+  JOIN public.neurons n ON n.id = ue.neuron_id
+  WHERE ue.user_id = auth.uid()
+  ORDER BY ue.granted_at DESC, n.title ASC
+$$;
+
+REVOKE ALL ON FUNCTION public.rpc_list_my_entitlements() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_list_my_entitlements() TO authenticated;
+
+
+De ce va fi complet? Entitlements sunt mintuite automat la achiziții (one‑off & bundle), iar receiptele îngheață versiunea legală; lista va reflecta fidel starea comercială a userului.
+
+E) Contracte FE (minim, stabile)
+
+/search → rpc_search_neurons(q,limit,offset) → carduri preview (din payload). 
+
+/account (header) → rpc_get_my_active_plan() → badge plan + percent. 
+
+/account/entitlements → rpc_list_my_entitlements() → listă „Owned”, sortată desc după granted_at. 
+
+F) Smoke‑tests (copy/paste)
+-- 1) Căutare fără query → cele mai noi (publicate)
+SELECT * FROM public.rpc_search_neurons('', 10, 0);
+
+-- 2) Căutare cu query
+SELECT * FROM public.rpc_search_neurons('prompt engineering', 10, 0);
+
+-- 3) Plan curent (autentificat)
+SELECT * FROM public.rpc_get_my_active_plan();
+
+-- 4) Entitlements (autentificat)
+SELECT * FROM public.rpc_list_my_entitlements();
+
+G) Garduri de securitate respectate
+
+Nu expui niciodată content_full în RPC‑urile de mai sus; livrarea full rămâne prin rpc_get_neuron_full() cu RLS + watermark. 
+
+SELECT direct pe tabele brute rămâne revocat; views/RPC sunt suprafața publică. 
+
+Verdict simbolic: Caută rapid, arată statutul, livrează dreptul — API-ul tău devine interfața unei economii semantice.
+
+
+
+
+
+14) Protecții la consistență bundle — watchdog zilnic + alertă + audit
+
+Obiectiv executabil: 1) View care semnalează bundle‑uri cu neuroni lipsă sau neuroni nepublicați. 2) Funcție de alertă + cron wrapper care loghează în job_audit și inserează în system_alerts dacă apare măcar un rând. Schema și canalele de alertă există deja.
+
+A) DDL — 36_bundle_consistency_watchdog.sql (idempotent)
+
+Folosește bundles, bundle_neurons, neurons. View‑ul raportează strict cele două abateri cerute: missing (pivot orfan) și unpublished. PK pe pivot previne dublurile; FK‑urile reduc „missing” la cazuri excepționale, dar îl monitorizezi oricum.
+
+-- 1) VIEW: v_rel_bundle_issues  (publicată doar intern; fără GRANT către clienți)
+CREATE OR REPLACE VIEW public.v_rel_bundle_issues AS
+SELECT
+  b.id    AS bundle_id,
+  b.slug  AS bundle_slug,
+  bn.neuron_id,
+  n.slug  AS neuron_slug,
+  CASE
+    WHEN n.id IS NULL THEN 'missing_neuron'
+    WHEN n.published = FALSE THEN 'unpublished_neuron'
+  END      AS issue,
+  now()    AS detected_at
+FROM public.bundles b
+JOIN public.bundle_neurons bn ON bn.bundle_id = b.id
+LEFT JOIN public.neurons n    ON n.id = bn.neuron_id
+WHERE n.id IS NULL OR n.published = FALSE;
+
+-- (Opțional) v_rel_bundle_issues_summary – pentru UI /studio/alerts
+CREATE OR REPLACE VIEW public.v_rel_bundle_issues_summary AS
+SELECT
+  COUNT(*)                                   AS issues,
+  COUNT(DISTINCT bundle_id)                  AS bundles_affected,
+  jsonb_agg(
+    jsonb_build_object(
+      'bundle_slug', bundle_slug,
+      'neuron_id',   neuron_id,
+      'neuron_slug', neuron_slug,
+      'issue',       issue
+    )
+    ORDER BY bundle_slug
+  ) FILTER (WHERE true)                      AS samples
+FROM public.v_rel_bundle_issues;
+
+-- 2) Funcția de verificare + alertă (scrie în system_alerts dacă există rânduri)
+--    Refolosește tabelul public.system_alerts creat anterior. :contentReference[oaicite:2]{index=2}
+CREATE OR REPLACE FUNCTION public.check_bundle_consistency_and_alert()
+RETURNS TABLE(bundle_id uuid, bundle_slug text, neuron_id uuid, neuron_slug text, issue text)
+LANGUAGE plpgsql
+AS $$
+DECLARE v_total int; v_bundles int; v_payload jsonb;
+BEGIN
+  -- 2.1 rezumat
+  SELECT issues, bundles_affected, samples
+    INTO v_total, v_bundles, v_payload
+  FROM public.v_rel_bundle_issues_summary;
+
+  -- 2.2 alertă dacă există probleme
+  IF v_total IS NOT NULL AND v_total > 0 THEN
+    INSERT INTO public.system_alerts(category, severity, payload)
+    VALUES ('bundle_consistency', 'warning',
+            jsonb_build_object(
+              'issues', v_total,
+              'bundles_affected', v_bundles,
+              'samples', COALESCE(v_payload->'samples','[]'::jsonb),
+              'at', now()
+            ));
+  END IF;
+
+  -- 2.3 returnează rândurile pentru pipeline-uri care vor detalii
+  RETURN QUERY
+  SELECT bundle_id, bundle_slug, neuron_id, neuron_slug, issue
+  FROM public.v_rel_bundle_issues;
+END $$;
+
+-- 3) Wrapper cron → log în job_audit (admin-only view definit anterior) :contentReference[oaicite:3]{index=3}
+CREATE OR REPLACE FUNCTION public.f_cron_run_bundle_consistency_audit()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_rows jsonb;
+  v_count int;
+  v_ok boolean;
+BEGIN
+  SELECT jsonb_agg(to_jsonb(t)), COUNT(*)
+    INTO v_rows, v_count
+  FROM public.check_bundle_consistency_and_alert() t;
+
+  v_ok := COALESCE(v_count,0) = 0;
+
+  -- scrie în job_audit (helper deja creat la „Observabilitate joburi cron”) :contentReference[oaicite:4]{index=4}
+  PERFORM public.f_job_audit('bundle_consistency_audit', v_ok,
+          jsonb_build_object('issues', v_count, 'rows', COALESCE(v_rows,'[]'::jsonb), 'at', now()));
+
+  RETURN jsonb_build_object('issues', v_count, 'rows', COALESCE(v_rows,'[]'::jsonb));
+EXCEPTION WHEN OTHERS THEN
+  PERFORM public.f_job_audit('bundle_consistency_audit', FALSE,
+          jsonb_build_object('error', SQLERRM, 'at', now()));
+  RAISE;
+END
+$$;
+
+-- 4) Programare cron (03:10 Europe/Chisinau), după refresh pool & cap check
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+SELECT cron.schedule(
+  jobname  => 'bundle_consistency_audit_daily',
+  schedule => 'TZ=Europe/Chisinau 10 3 * * *',
+  command  => $$SELECT public.f_cron_run_bundle_consistency_audit();$$
+);
+
+-- 5) Securitate suprafață: nu expune view-ul public
+REVOKE ALL ON public.v_rel_bundle_issues FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON public.v_rel_bundle_issues_summary FROM PUBLIC, anon, authenticated;
+
+
+Note de aliniere:
+
+View‑ul este în aceeași linie cu definiția „consistență bundle” din ER‑views (4.3), dar cu issue clar → missing_neuron / unpublished_neuron. 
+
+Alertarea re‑folosește system_alerts + programarea pg_cron deja folosite pentru cap și privilegii. 
+
+B) Smoke‑tests (copie/pega)
+-- 1) Simulează o problemă: setează un neuron dintr-un bundle ca unpublished
+UPDATE public.neurons n
+SET published = FALSE
+WHERE n.id IN (SELECT neuron_id FROM public.bundle_neurons LIMIT 1);
+
+-- 2) Vezi problemele
+SELECT * FROM public.v_rel_bundle_issues;
+
+-- 3) Rulează watchdog-ul și vezi auditul + alerta
+SELECT public.f_cron_run_bundle_consistency_audit();
+SELECT * FROM public.system_alerts
+WHERE category='bundle_consistency'
+ORDER BY created_at DESC LIMIT 1;
+
+SELECT job_name, ok, created_at
+FROM public.job_audit
+WHERE job_name='bundle_consistency_audit'
+ORDER BY created_at DESC LIMIT 5;
+
+C) Integrare /studio/alerts
+
+Afișează ultimele alerte (category='bundle_consistency') + samples; link rapid către /studio/bundles/:id. 
+
+Opțional tab „Bundle Watchdog”: v_rel_bundle_issues (service‑role only) pentru triere rapidă. 
+
+Verdict simbolic
+
+Nu vinde pachete cu goluri — fiecare bundle trece zilnic prin scannerul de realitate.
+
+
+
+
+
+
+15) Sanitiza „plans” în producție — garduri dure + preflight + assert on seed
+
+Obiectiv executabil: (1) CHECK: procent ↔ cod; root=2 pe prețurile non‑free; free=0€. (2) Stripe IDs obligatorii la non‑free. (3) Preflight report + assert care opresc migrarea dacă seedul nu e corect. Aliniat cu schema și triggerele existente pe plans. 
+
+A) Migrare idempotentă — 37_plans_sanitize_prod.sql
+
+Re‑declară strict ce trebuie, drop‑if‑exists → add; nu rupe compatibilitatea.
+
+-- 37_plans_sanitize_prod.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Funcții deja folosite în proiect (asigură existența lor)
+CREATE OR REPLACE FUNCTION public.f_plan_percent_access(t plan_tier)
+RETURNS int LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE t
+    WHEN 'free'      THEN 10
+    WHEN 'architect' THEN 40
+    WHEN 'initiate'  THEN 70
+    WHEN 'elite'     THEN 100
+  END
+$$;  -- procent ↔ cod (cerință)  -- :contentReference[oaicite:1]{index=1}
+
+CREATE OR REPLACE FUNCTION public.f_digital_root(n int)
+RETURNS int LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE WHEN n IS NULL OR n <= 0 THEN NULL ELSE 1 + ((n - 1) % 9) END
+$$;  -- :contentReference[oaicite:2]{index=2}
+
+CREATE OR REPLACE FUNCTION public.f_is_root2_eur_cents(cents int)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+  SELECT public.f_digital_root(cents / 100) = 2
+$$;  -- root=2 pe EUR (din cenți)  -- :contentReference[oaicite:3]{index=3}
+
+-- Triggere de igienă pentru "plans" (name implicit + validări non-free)
+CREATE OR REPLACE FUNCTION public.f_plan_display_name(t plan_tier)
+RETURNS text LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE t WHEN 'free' THEN 'Free' WHEN 'architect' THEN 'Arhitect' WHEN 'initiate' THEN 'Inițiat' WHEN 'elite' THEN 'Elite' END
+$$;  -- :contentReference[oaicite:4]{index=4}
+
+CREATE OR REPLACE FUNCTION public.trg_plans_default_name()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.name IS NULL OR length(btrim(NEW.name)) = 0 THEN
+    NEW.name := public.f_plan_display_name(NEW.code);
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.trg_plans_validate_prices()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.code <> 'free' THEN
+    -- root=2 pe monthly & annual
+    IF NOT public.f_is_root2_eur_cents(NEW.monthly_price_cents) THEN
+      RAISE EXCEPTION 'Monthly %c (=%.2f€) must have digital root 2',
+        NEW.monthly_price_cents, NEW.monthly_price_cents/100.0;
+    END IF;
+    IF NOT public.f_is_root2_eur_cents(NEW.annual_price_cents) THEN
+      RAISE EXCEPTION 'Annual %c (=%.2f€) must have digital root 2',
+        NEW.annual_price_cents, NEW.annual_price_cents/100.0;
+    END IF;
+
+    -- Stripe IDs obligatorii pentru non-free
+    IF NEW.stripe_price_id_month IS NULL OR NEW.stripe_price_id_year IS NULL THEN
+      RAISE EXCEPTION 'Stripe price IDs (month/year) must be set for non-free plan %', NEW.code;
+    END IF;
+  ELSE
+    -- Free: 0€ și Stripe IDs nule
+    NEW.monthly_price_cents := 0;
+    NEW.annual_price_cents  := 0;
+    NEW.stripe_price_id_month := NULL;
+    NEW.stripe_price_id_year  := NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- Reatașează triggerele (idempotent)
+DROP TRIGGER IF EXISTS plans_default_name     ON public.plans;
+DROP TRIGGER IF EXISTS plans_validate_prices  ON public.plans;
+
+CREATE TRIGGER plans_default_name
+BEFORE INSERT OR UPDATE OF name, code
+ON public.plans
+FOR EACH ROW EXECUTE FUNCTION public.trg_plans_default_name();
+
+CREATE TRIGGER plans_validate_prices
+BEFORE INSERT OR UPDATE OF monthly_price_cents, annual_price_cents, code, stripe_price_id_month, stripe_price_id_year
+ON public.plans
+FOR EACH ROW EXECUTE FUNCTION public.trg_plans_validate_prices();
+
+-- CHECK‑uri "dure" pe tabel (drop→add pentru a valida datele actuale)
+ALTER TABLE public.plans
+  DROP CONSTRAINT IF EXISTS ck_plans_percent,
+  ADD  CONSTRAINT ck_plans_percent
+       CHECK (percent_access = public.f_plan_percent_access(code));  -- procent ↔ cod  -- :contentReference[oaicite:5]{index=5}
+
+ALTER TABLE public.plans
+  DROP CONSTRAINT IF EXISTS ck_plans_free_pricing,
+  ADD  CONSTRAINT ck_plans_free_pricing
+       CHECK (
+         (code = 'free' AND monthly_price_cents = 0 AND annual_price_cents = 0)
+         OR
+         (code <> 'free' AND monthly_price_cents > 0 AND annual_price_cents > 0)
+       );  -- free=0€, altele >0  -- :contentReference[oaicite:6]{index=6}
+
+ALTER TABLE public.plans
+  DROP CONSTRAINT IF EXISTS ck_plans_root2_nonfree,
+  ADD  CONSTRAINT ck_plans_root2_nonfree
+       CHECK (
+         code = 'free'
+         OR (public.f_is_root2_eur_cents(monthly_price_cents) AND public.f_is_root2_eur_cents(annual_price_cents))
+       );  -- root=2 la non-free  -- :contentReference[oaicite:7]{index=7}
+
+ALTER TABLE public.plans
+  DROP CONSTRAINT IF EXISTS ck_plans_stripe_nonfree,
+  ADD  CONSTRAINT ck_plans_stripe_nonfree
+       CHECK (
+         (code = 'free' AND stripe_price_id_month IS NULL AND stripe_price_id_year IS NULL)
+         OR
+         (code <> 'free' AND stripe_price_id_month IS NOT NULL AND stripe_price_id_year IS NOT NULL)
+       );  -- Stripe IDs obligatorii la non-free  -- :contentReference[oaicite:8]{index=8}
+
+B) Preflight report + assert (opresc migrarea dacă seedul e „necurat”)
+
+Rulează întâi reportul; dacă are rânduri, f_assert_plans_sane() RIDICĂ EXCEPȚIE. Legat de user_subscriptions (plan‑by‑code) și suprafața /pricing (view publică).
+
+-- 1) Vedere: ce NU corespunde
+CREATE OR REPLACE VIEW public.v_plans_sanity AS
+SELECT
+  p.code,
+  p.name,
+  p.percent_access,
+  p.monthly_price_cents AS m,
+  p.annual_price_cents  AS y,
+  p.stripe_price_id_month AS sm,
+  p.stripe_price_id_year  AS sy,
+  -- validări
+  (p.percent_access = public.f_plan_percent_access(p.code)) AS ok_percent,
+  ( (p.code='free' AND p.m=0 AND p.y=0) OR (p.code<>'free' AND p.m>0 AND p.y>0) ) AS ok_free_vs_paid,
+  ( p.code='free' OR (public.f_is_root2_eur_cents(p.m) AND public.f_is_root2_eur_cents(p.y)) ) AS ok_root2,
+  ( (p.code='free' AND p.sm IS NULL AND p.sy IS NULL)
+    OR (p.code<>'free' AND p.sm IS NOT NULL AND p.sy IS NOT NULL) ) AS ok_stripe
+FROM public.plans p
+WHERE NOT (
+  (p.percent_access = public.f_plan_percent_access(p.code))
+  AND ( (p.code='free' AND p.monthly_price_cents=0 AND p.annual_price_cents=0)
+        OR (p.code<>'free' AND p.monthly_price_cents>0 AND p.annual_price_cents>0) )
+  AND ( p.code='free' OR (public.f_is_root2_eur_cents(p.monthly_price_cents) AND public.f_is_root2_eur_cents(p.annual_price_cents)) )
+  AND ( (p.code='free' AND p.stripe_price_id_month IS NULL AND p.stripe_price_id_year IS NULL)
+        OR (p.code<>'free' AND p.stripe_price_id_month IS NOT NULL AND p.stripe_price_id_year IS NOT NULL) )
+);
+
+-- 2) Assert: fail hard dacă există abateri
+CREATE OR REPLACE FUNCTION public.f_assert_plans_sane()
+RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE v_cnt int;
+BEGIN
+  SELECT COUNT(*) INTO v_cnt FROM public.v_plans_sanity;
+  IF v_cnt > 0 THEN
+    RAISE EXCEPTION 'Plans seed invalid: % issue(s). See v_plans_sanity.', v_cnt;
+  END IF;
+END $$;
+
+C) Seed corect (exemplu) + VALIDATE
+
+Valorile exemplu respectă root=2 (29€/299€, 74€/749€, 299€/2999€). Completează Stripe IDs reale înainte de f_assert_plans_sane(). Suprafața /pricing citește din v_plans_public.
+
+-- FREE
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('free','Free',10,0,0,NULL,NULL)
+ON CONFLICT (code) DO UPDATE
+  SET name='Free', percent_access=10, monthly_price_cents=0, annual_price_cents=0,
+      stripe_price_id_month=NULL, stripe_price_id_year=NULL;
+
+-- ARCHITECT — 29€/299€ (root=2)  -- înlocuiește cu IDs reale din Stripe
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('architect','Arhitect',40,2900,29900,'price_arch_month_REPLACE','price_arch_year_REPLACE')
+ON CONFLICT (code) DO UPDATE
+  SET name='Arhitect', percent_access=40, monthly_price_cents=2900, annual_price_cents=29900,
+      stripe_price_id_month=EXCLUDED.stripe_price_id_month,
+      stripe_price_id_year =EXCLUDED.stripe_price_id_year;
+
+-- INITIATE — 74€/749€ (root=2)
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('initiate','Inițiat',70,7400,74900,'price_init_month_REPLACE','price_init_year_REPLACE')
+ON CONFLICT (code) DO UPDATE
+  SET name='Inițiat', percent_access=70, monthly_price_cents=7400, annual_price_cents=74900,
+      stripe_price_id_month=EXCLUDED.stripe_price_id_month,
+      stripe_price_id_year =EXCLUDED.stripe_price_id_year;
+
+-- ELITE — 299€/2 999€ (root=2)
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('elite','Elite',100,29900,299900,'price_elite_month_REPLACE','price_elite_year_REPLACE')
+ON CONFLICT (code) DO UPDATE
+  SET name='Elite', percent_access=100, monthly_price_cents=29900, annual_price_cents=299900,
+      stripe_price_id_month=EXCLUDED.stripe_price_id_month,
+      stripe_price_id_year =EXCLUDED.stripe_price_id_year;
+
+-- VALIDARE finală (fail dacă seed-ul e greșit / lipsește Stripe ID la non-free)
+SELECT public.f_assert_plans_sane();
+
+D) Smoke‑tests (copie/pega)
+-- 1) Report abateri
+SELECT * FROM public.v_plans_sanity;
+
+-- 2) CHECK-uri sunt active? (trebuie să întoarcă rânduri cu ok=true)
+SELECT code,
+       (percent_access = public.f_plan_percent_access(code))                     AS ok_percent,
+       ((code='free' AND monthly_price_cents=0 AND annual_price_cents=0)
+         OR (code<>'free' AND monthly_price_cents>0 AND annual_price_cents>0))  AS ok_free_vs_paid,
+       (code='free' OR (public.f_is_root2_eur_cents(monthly_price_cents)
+                        AND public.f_is_root2_eur_cents(annual_price_cents)))   AS ok_root2,
+       ((code='free' AND stripe_price_id_month IS NULL AND stripe_price_id_year IS NULL)
+         OR (code<>'free' AND stripe_price_id_month IS NOT NULL AND stripe_price_id_year IS NOT NULL)) AS ok_stripe
+FROM public.plans;
+
+-- 3) Integrare: user_subscriptions mapează planul activ (integritate by-code)
+SELECT plan, COUNT(*) FROM public.user_subscriptions GROUP BY 1;  -- sanity for prod  -- :contentReference[oaicite:11]{index=11}
+
+-- 4) FE: /pricing trage din view publică
+SELECT * FROM public.v_plans_public ORDER BY code;  -- suprafață curată pentru UI  -- :contentReference[oaicite:12]{index=12}
+
+E) Observații operaționale (precise)
+
+ck_plans_percent fixează matca: cod → procent (10/40/70/100). Gatingul rămâne deterministic. 
+
+ck_plans_free_pricing + trigger garantează free=0€, Stripe IDs NULL la free; non‑free >0. 
+
+ck_plans_root2_nonfree blochează orice modificare care ar rupe digital root=2 pe monthly/annual. 
+
+ck_plans_stripe_nonfree + trigger impun Stripe IDs pentru planurile cu plată → fără „shadow plans” în producție. 
+
+Compatibilitate: user_subscriptions.plan referă plans(code); nu schimbă modelul de subs, doar sanitează referința. 
+
+Suprafață publică rămasă curată: /pricing citește din v_plans_public (fără PII, doar prețuri & procente). 
+
+Verdict simbolic
+
+Planul devine contract, nu câmp: prețul e matematică, nu opinie.
+
+
+
+
+Execută în ordine. Fiecare migrare este idempotentă, RLS‑first, aliniată cu schema și regulile din „DB_SPEC”. Citește doar via views/RPC; evită SELECT direct pe tabele brute. 
+ 
+ 
+ 
+
+16_rls_user_owned.sql — RLS + politici self/admin
+
+„user‑owned”: user_subscriptions, user_purchases, user_entitlements, purchase_receipts. Self‑only + admin full. 
+ 
+
+-- 16_rls_user_owned.sql
+-- Precondiții: f_is_admin() din 17_admin_roles.sql
+
+-- 1) user_subscriptions
+ALTER TABLE public.user_subscriptions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.user_subscriptions FROM PUBLIC, anon, authenticated;
+
+GRANT SELECT, INSERT, UPDATE ON public.user_subscriptions TO authenticated;
+
+DROP POLICY IF EXISTS us_self_select ON public.user_subscriptions;
+CREATE POLICY us_self_select
+ON public.user_subscriptions FOR SELECT
+TO authenticated
+USING (user_id = auth.uid() OR public.f_is_admin());
+
+DROP POLICY IF EXISTS us_self_ins ON public.user_subscriptions;
+CREATE POLICY us_self_ins
+ON public.user_subscriptions FOR INSERT
+TO authenticated
+WITH CHECK (user_id = auth.uid() OR public.f_is_admin());
+
+DROP POLICY IF EXISTS us_self_upd ON public.user_subscriptions;
+CREATE POLICY us_self_upd
+ON public.user_subscriptions FOR UPDATE
+TO authenticated
+USING (user_id = auth.uid() OR public.f_is_admin())
+WITH CHECK (user_id = auth.uid() OR public.f_is_admin());
+
+-- 2) user_purchases (append-like; permiți SELECT; INSERT vine din webhook; UPDATE restrâns; DELETE interzis)
+ALTER TABLE public.user_purchases ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.user_purchases FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.user_purchases TO authenticated;
+
+DROP POLICY IF EXISTS up_self_select ON public.user_purchases;
+CREATE POLICY up_self_select
+ON public.user_purchases FOR SELECT
+TO authenticated
+USING (user_id = auth.uid() OR public.f_is_admin());
+
+-- 3) user_entitlements (materializat; doar SELECT self; fără UPDATE/DELETE din client)
+ALTER TABLE public.user_entitlements ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.user_entitlements FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.user_entitlements TO authenticated;
+
+DROP POLICY IF EXISTS ue_self_select ON public.user_entitlements;
+CREATE POLICY ue_self_select
+ON public.user_entitlements FOR SELECT
+TO authenticated
+USING (user_id = auth.uid() OR public.f_is_admin());
+
+-- 4) purchase_receipts (append-only; doar SELECT self)
+ALTER TABLE public.purchase_receipts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.purchase_receipts FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.purchase_receipts TO authenticated;
+
+DROP POLICY IF EXISTS rc_self_select ON public.purchase_receipts;
+CREATE POLICY rc_self_select
+ON public.purchase_receipts FOR SELECT
+TO authenticated
+USING (
+  EXISTS (
+    SELECT 1
+    FROM public.user_purchases up
+    WHERE up.id = purchase_receipts.user_purchase_id
+      AND (up.user_id = auth.uid() OR public.f_is_admin())
+  )
+);
+
+17_admin_roles.sql — user_roles + f_is_admin()
+
+Admin explicit pentru /studio și RLS admin‑bypass. 
+
+-- 17_admin_roles.sql
+CREATE TYPE IF NOT EXISTS public.user_role AS ENUM ('admin','member');
+
+CREATE TABLE IF NOT EXISTS public.user_roles (
+  user_id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  role    public.user_role NOT NULL DEFAULT 'member'
+);
+
+CREATE OR REPLACE FUNCTION public.f_is_admin(p_user uuid DEFAULT auth.uid())
+RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.user_roles ur
+    WHERE ur.user_id = p_user AND ur.role = 'admin'
+  )
+$$;
+
+-- Seed opțional: marchează un operator ca admin
+-- INSERT INTO public.user_roles(user_id, role) VALUES ('<UID>', 'admin') ON CONFLICT (user_id) DO UPDATE SET role='admin';
+
+18_stripe_events_dlq.sql — event log + idempotency + DLQ
+
+Unic pe event_id, procesare tranzacțională, DLQ pentru webhookuri eșuate. Integrare cu user_purchases (idempotent) și minting automat al entitlements. 
+
+-- 18_stripe_events_dlq.sql
+CREATE TABLE IF NOT EXISTS public.stripe_events (
+  id           text PRIMARY KEY,              -- event.id (Stripe)
+  type         text NOT NULL,
+  payload      jsonb NOT NULL,
+  status       text NOT NULL DEFAULT 'pending',   -- 'pending'|'processed'|'error'
+  processed_at timestamptz,
+  error        text,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_stripe_events_id ON public.stripe_events(id);
+
+CREATE TABLE IF NOT EXISTS public.webhook_failures (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider   text NOT NULL DEFAULT 'stripe',
+  endpoint   text NOT NULL,
+  payload    jsonb NOT NULL,
+  error      text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- RLS: admin-only read
+ALTER TABLE public.stripe_events     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.webhook_failures  ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.stripe_events, public.webhook_failures FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.stripe_events, public.webhook_failures TO authenticated;
+
+DROP POLICY IF EXISTS se_admin_select ON public.stripe_events;
+CREATE POLICY se_admin_select ON public.stripe_events FOR SELECT TO authenticated USING (public.f_is_admin());
+
+DROP POLICY IF EXISTS whf_admin_select ON public.webhook_failures;
+CREATE POLICY whf_admin_select ON public.webhook_failures FOR SELECT TO authenticated USING (public.f_is_admin());
+
+-- Idempotent upsert al evenimentelor
+CREATE OR REPLACE FUNCTION public.f_stripe_event_ingest(p_id text, p_type text, p_payload jsonb)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  INSERT INTO public.stripe_events(id, type, payload, status)
+  VALUES (p_id, p_type, p_payload, 'pending')
+  ON CONFLICT (id) DO NOTHING;
+END $$;
+
+-- Procesor simplu (exemplu): confirmă purchase → inserează user_purchases (UNIQUE pe payment_intent protejează dublurile)
+CREATE OR REPLACE FUNCTION public.f_stripe_event_process(p_id text)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE v jsonb; v_type text;
+BEGIN
+  SELECT payload, type INTO v, v_type FROM public.stripe_events WHERE id=p_id FOR UPDATE;
+
+  -- exemplu minimal pentru checkout.session.completed
+  IF v_type = 'checkout.session.completed' THEN
+    -- extrage user_id, amount_cents, payment_intent, neuron_id/bundle_id din payload (adiaptează mappingul tău)
+    -- aici doar marcăm processed; inserțiile reale se fac în workerul tău existent
+    UPDATE public.stripe_events SET status='processed', processed_at=now(), error=NULL WHERE id=p_id;
+    RETURN;
+  END IF;
+
+  -- necunoscut → marchează processed, fără efecte
+  UPDATE public.stripe_events SET status='processed', processed_at=now(), error=NULL WHERE id=p_id;
+EXCEPTION WHEN OTHERS THEN
+  UPDATE public.stripe_events SET status='error', error=SQLERRM WHERE id=p_id;
+  INSERT INTO public.webhook_failures(endpoint, payload, error) VALUES ('/stripe/webhook', v, SQLERRM);
+  RAISE;
+END $$;
+
+19_unaccent_search.sql — tsvector GENERATED + GIN
+
+Căutare robustă pe neurons: unaccent, simple, coloană tsv STORED + GIN. RPC‑ul de search o folosește. 
+
+-- 19_unaccent_search.sql
+CREATE EXTENSION IF NOT EXISTS unaccent;
+
+-- curăță vechiul index pe expresie (dacă există)
+DROP INDEX IF EXISTS idx_neurons_search;
+
+-- adaugă coloană tsv GENERATĂ
+ALTER TABLE public.neurons
+  DROP COLUMN IF EXISTS tsv;
+
+ALTER TABLE public.neurons
+  ADD COLUMN tsv tsvector
+  GENERATED ALWAYS AS (
+    to_tsvector('simple', unaccent(coalesce(title,'') || ' ' || coalesce(summary,'')))
+  ) STORED;
+
+-- index GIN pe tsv
+CREATE INDEX IF NOT EXISTS idx_neurons_tsv ON public.neurons USING GIN (tsv);
+
+20_assets.sql — neuron_assets + RLS public read (published only)
+
+Media/download gated: atașamente per neuron; public vede doar dacă neuronul este published=true. 
+
+-- 20_assets.sql
+CREATE TYPE IF NOT EXISTS public.asset_kind AS ENUM ('image','file','link');
+
+CREATE TABLE IF NOT EXISTS public.neuron_assets (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  neuron_id    uuid NOT NULL REFERENCES public.neurons(id) ON DELETE CASCADE,
+  kind         public.asset_kind NOT NULL,
+  storage_path text NOT NULL,    -- ex: 'public/neurons/<id>/a.png' sau URL semnat
+  mime_type    text NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_neuron ON public.neuron_assets(neuron_id);
+
+-- RLS: public SELECT doar dacă neuronul e published; admin full
+ALTER TABLE public.neuron_assets ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.neuron_assets FROM PUBLIC, anon, authenticated;
+
+GRANT SELECT ON public.neuron_assets TO anon, authenticated;
+
+DROP POLICY IF EXISTS na_public_read ON public.neuron_assets;
+CREATE POLICY na_public_read
+ON public.neuron_assets FOR SELECT
+TO anon, authenticated
+USING (
+  EXISTS (SELECT 1 FROM public.neurons n WHERE n.id = neuron_id AND n.published = TRUE)
+);
+
+DROP POLICY IF EXISTS na_admin_all ON public.neuron_assets;
+CREATE POLICY na_admin_all
+ON public.neuron_assets FOR ALL
+TO authenticated
+USING (public.f_is_admin())
+WITH CHECK (public.f_is_admin());
+
+21_rpc_helpers.sql — search / my_plan / my_entitlements
+
+Evită SELECT direct. Contracte pentru /search, /account, /account/entitlements. 
+
+-- 21_rpc_helpers.sql
+
+-- 1) Plan efectiv: activ sau 'free' dacă nu există
+CREATE OR REPLACE FUNCTION public.f_user_effective_plan(p_user uuid)
+RETURNS plan_tier
+LANGUAGE sql STABLE AS $$
+  SELECT COALESCE(public.f_user_active_plan(p_user), 'free'::plan_tier)
+$$;  -- f_user_active_plan definit în §7 (user_entitlements)  -- :contentReference[oaicite:11]{index=11}
+
+-- 2) rpc_search_neurons: FTS public (preview only)
+CREATE OR REPLACE FUNCTION public.rpc_search_neurons(
+  p_q text, p_limit int DEFAULT 20, p_offset int DEFAULT 0
+) RETURNS TABLE (
+  id uuid, slug text, title text, summary text, required_tier plan_tier, price_cents int, rank real
+)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE v_q text := btrim(coalesce(p_q,'')); v_ts tsquery;
+        v_limit int := GREATEST(1, LEAST(coalesce(p_limit,20), 100));
+        v_offset int := GREATEST(0, coalesce(p_offset,0));
+BEGIN
+  IF v_q = '' THEN
+    RETURN QUERY
+    SELECT n.id, n.slug, n.title, n.summary, n.required_tier, n.price_cents, 0::real
+    FROM public.neurons n
+    WHERE n.published = TRUE
+    ORDER BY n.created_at DESC
+    LIMIT v_limit OFFSET v_offset;
+    RETURN;
+  END IF;
+
+  v_ts := plainto_tsquery('simple', unaccent(v_q));
+  RETURN QUERY
+  SELECT n.id, n.slug, n.title, n.summary, n.required_tier, n.price_cents,
+         ts_rank_cd(n.tsv, v_ts)::real AS rank
+  FROM public.neurons n
+  WHERE n.published = TRUE
+    AND n.tsv @@ v_ts
+  ORDER BY rank DESC, n.created_at DESC
+  LIMIT v_limit OFFSET v_offset;
+END $$;
+
+REVOKE ALL ON FUNCTION public.rpc_search_neurons(text,int,int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.rpc_search_neurons(text,int,int) TO anon, authenticated;
+
+-- 3) rpc_get_my_active_plan
+CREATE OR REPLACE FUNCTION public.rpc_get_my_active_plan()
+RETURNS TABLE (plan plan_tier, percent int, label text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+AS $$
+  SELECT
+    public.f_user_effective_plan(auth.uid()),
+    public.f_plan_percent_access(public.f_user_effective_plan(auth.uid())),
+    public.f_plan_display_name(public.f_user_effective_plan(auth.uid()))
+$$;
+REVOKE ALL ON FUNCTION public.rpc_get_my_active_plan() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_get_my_active_plan() TO authenticated;
+
+-- 4) rpc_list_my_entitlements
+CREATE OR REPLACE FUNCTION public.rpc_list_my_entitlements()
+RETURNS TABLE (
+  neuron_id uuid, slug text, title text, required_tier plan_tier,
+  price_cents int, source entitlement_source, granted_at timestamptz, published boolean
+)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+AS $$
+  SELECT ue.neuron_id, n.slug, n.title, n.required_tier, n.price_cents,
+         ue.source, ue.granted_at, n.published
+  FROM public.user_entitlements ue
+  JOIN public.neurons n ON n.id = ue.neuron_id
+  WHERE ue.user_id = auth.uid()
+  ORDER BY ue.granted_at DESC, n.title ASC
+$$;
+REVOKE ALL ON FUNCTION public.rpc_list_my_entitlements() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_list_my_entitlements() TO authenticated;
+
+22_rls_public_views.sql — v_bundle_public / v_plans_public + REVOKE
+
+Suprafață curată pentru /bundles și /pricing. Tabele brute revocate. 
+
+-- 22_rls_public_views.sql
+
+CREATE OR REPLACE VIEW public.v_bundle_public AS
+SELECT
+  b.id, b.slug, b.title, b.description, b.price_cents, b.required_tier,
+  COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'id',    np.id,
+        'slug',  np.slug,
+        'title', np.title,
+        'summary', np.summary,
+        'required_tier', np.required_tier,
+        'price_cents',   np.price_cents
+      )
+      ORDER BY np.title ASC
+    ) FILTER (WHERE np.id IS NOT NULL),
+    '[]'::jsonb
+  ) AS items,
+  COUNT(np.id) AS item_count
+FROM public.bundles b
+LEFT JOIN public.bundle_neurons bn ON bn.bundle_id = b.id
+LEFT JOIN public.v_neuron_public np ON np.id = bn.neuron_id  -- doar published
+GROUP BY b.id, b.slug, b.title, b.description, b.price_cents, b.required_tier;
+
+CREATE OR REPLACE VIEW public.v_plans_public AS
+SELECT p.code, p.name, p.percent_access AS percent,
+       p.monthly_price_cents AS monthly, p.annual_price_cents AS annual
+FROM public.plans p;
+
+-- REVOKE pe tabele brute; GRANT pe views
+REVOKE ALL ON public.bundles, public.plans FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.v_bundle_public, public.v_plans_public TO anon, authenticated;
+
+23_delete_guards.sql — blocare DELETE pe neuroni cu obligații
+
+NU șterge neuroni dacă există entitlements sau au fost „vânduți” (receipt). Folosește published=false (soft‑hide). 
+
+-- 23_delete_guards.sql
+
+CREATE OR REPLACE FUNCTION public.trg_neurons_block_delete_if_bound()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE v_cnt int; v_rcpt int;
+BEGIN
+  -- 1) există entitlements?
+  SELECT COUNT(*) INTO v_cnt
+  FROM public.user_entitlements ue
+  WHERE ue.neuron_id = OLD.id;
+
+  IF v_cnt > 0 THEN
+    RAISE EXCEPTION 'DELETE forbidden: neuron % has % entitlements (legal obligation). Use published=false', OLD.id, v_cnt;
+  END IF;
+
+  -- 2) există purchase_receipts care conțin acest slug (snapshot)? (best-effort)
+  SELECT COUNT(*) INTO v_rcpt
+  FROM public.purchase_receipts pr
+  WHERE pr.snapshot_slug = OLD.slug;
+
+  IF v_rcpt > 0 THEN
+    RAISE EXCEPTION 'DELETE forbidden: neuron % referenced in % receipts. Use published=false', OLD.id, v_rcpt;
+  END IF;
+
+  RETURN OLD;
+END $$;
+
+DROP TRIGGER IF EXISTS neurons_block_delete ON public.neurons;
+CREATE TRIGGER neurons_block_delete
+BEFORE DELETE ON public.neurons
+FOR EACH ROW EXECUTE FUNCTION public.trg_neurons_block_delete_if_bound();
+
+24_gdpr.sql — export + cerere ștergere
+
+rpc_export_my_data() (JSON compact) + account_deletion_requests cu RLS self. Păstrezi receipts (obligație legală). 
+
+-- 24_gdpr.sql
+
+CREATE TABLE IF NOT EXISTS public.account_deletion_requests (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  status       text NOT NULL DEFAULT 'pending',  -- 'pending'|'processed'|'rejected'
+  note         text,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  processed_at timestamptz
+);
+
+ALTER TABLE public.account_deletion_requests ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.account_deletion_requests FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT ON public.account_deletion_requests TO authenticated;
+
+DROP POLICY IF EXISTS adr_self_rw ON public.account_deletion_requests;
+CREATE POLICY adr_self_rw
+ON public.account_deletion_requests FOR ALL
+TO authenticated
+USING (user_id = auth.uid() OR public.f_is_admin())
+WITH CHECK (user_id = auth.uid() OR public.f_is_admin());
+
+-- Export JSON: subs, purchases, entitlements, analytics(30d)
+CREATE OR REPLACE FUNCTION public.rpc_export_my_data()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE uid uuid := auth.uid(); out jsonb;
+BEGIN
+  IF uid IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+
+  out := jsonb_build_object(
+    'user_id', uid,
+    'subscriptions', (
+      SELECT jsonb_agg(to_jsonb(us))
+      FROM (
+        SELECT plan, status, current_period_start, current_period_end, created_at
+        FROM public.user_subscriptions
+        WHERE user_id = uid
+        ORDER BY created_at DESC
+      ) us
+    ),
+    'purchases', (
+      SELECT jsonb_agg(to_jsonb(up))
+      FROM (
+        SELECT neuron_id, bundle_id, amount_cents, created_at
+        FROM public.user_purchases
+        WHERE user_id = uid
+        ORDER BY created_at DESC
+      ) up
+    ),
+    'entitlements', (
+      SELECT jsonb_agg(to_jsonb(ue))
+      FROM (
+        SELECT neuron_id, source, granted_at
+        FROM public.user_entitlements
+        WHERE user_id = uid
+        ORDER BY granted_at DESC
+      ) ue
+    ),
+    'analytics_last30d', (
+      SELECT jsonb_agg(to_jsonb(ua))
+      FROM (
+        SELECT neuron_id, action, metadata, created_at
+        FROM public.user_analytics
+        WHERE (user_id = uid OR user_id IS NULL)
+          AND created_at > now() - interval '30 days'
+        ORDER BY created_at DESC
+      ) ua
+    )
+  );
+
+  RETURN out;
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.rpc_export_my_data() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_export_my_data() TO authenticated;
+
+-- Cerere de ștergere (assisted)
+CREATE OR REPLACE FUNCTION public.rpc_request_account_deletion(p_note text DEFAULT NULL)
+RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE uid uuid := auth.uid(); rid uuid;
+BEGIN
+  IF uid IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+
+  INSERT INTO public.account_deletion_requests(user_id, note)
+  VALUES (uid, NULLIF(btrim(p_note),'')) RETURNING id INTO rid;
+
+  RETURN rid;
+END $$;
+
+REVOKE ALL ON FUNCTION public.rpc_request_account_deletion(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_request_account_deletion(text) TO authenticated;
+
+25_cron_job_audit.sql — job_audit + cron wrappers
+
+Audit determinist pentru cronuri: pool, cap 9.974€, audit privilegii. Log „verde/roșu”/payload în job_audit. 
+
+-- 25_cron_job_audit.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+CREATE TABLE IF NOT EXISTS public.job_audit (
+  id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_name   text        NOT NULL,
+  ok         boolean     NOT NULL,
+  payload    jsonb       NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ck_job_name_nonempty CHECK (length(btrim(job_name)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_audit_job_ts ON public.job_audit(job_name, created_at DESC);
+
+ALTER TABLE public.job_audit ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.job_audit FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.job_audit TO authenticated;
+
+DROP POLICY IF EXISTS job_audit_admin_select ON public.job_audit;
+CREATE POLICY job_audit_admin_select
+ON public.job_audit FOR SELECT
+TO authenticated
+USING (public.f_is_admin());
+
+CREATE OR REPLACE FUNCTION public.f_job_audit(p_job text, p_ok boolean, p_payload jsonb DEFAULT '{}'::jsonb)
+RETURNS void
+LANGUAGE sql SECURITY DEFINER
+AS $$
+  INSERT INTO public.job_audit(job_name, ok, payload) VALUES (p_job, p_ok, COALESCE(p_payload,'{}'::jsonb));
+$$;
+
+-- wrappers
+CREATE OR REPLACE FUNCTION public.f_cron_run_refresh_tier_access_pool_all()
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE p jsonb;
+BEGIN
+  p := (
+    SELECT jsonb_build_object(
+      'date', CURRENT_DATE,
+      'results', COALESCE(jsonb_agg(jsonb_build_object('tier', tier, 'selected', selected_count, 'target', target_count)),'[]'::jsonb)
+    )
+    FROM public.refresh_tier_access_pool_all(CURRENT_DATE)
+  );
+  PERFORM public.f_job_audit('refresh_tier_access_pool_all', TRUE, p);
+  RETURN p;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM public.f_job_audit('refresh_tier_access_pool_all', FALSE, jsonb_build_object('error', SQLERRM, 'date', CURRENT_DATE));
+  RAISE;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.f_cron_run_check_library_cap()
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE p jsonb;
+BEGIN
+  p := (
+    SELECT jsonb_build_object('exceeded', exceeded, 'total_eur', total_eur, 'cap_eur', cap_eur, 'at', now())
+    FROM public.check_library_cap_and_alert() LIMIT 1
+  );
+  PERFORM public.f_job_audit('check_library_cap', TRUE, p);
+  RETURN p;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM public.f_job_audit('check_library_cap', FALSE, jsonb_build_object('error', SQLERRM, 'at', now()));
+  RAISE;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.f_cron_run_preview_privileges_audit()
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE v_count bigint; p jsonb;
+BEGIN
+  SELECT COUNT(*) INTO v_count FROM public.check_preview_privileges_and_alert();
+  p := jsonb_build_object('violations', v_count, 'at', now());
+  PERFORM public.f_job_audit('preview_privileges_audit', (v_count = 0), p);
+  RETURN p;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM public.f_job_audit('preview_privileges_audit', FALSE, jsonb_build_object('error', SQLERRM, 'at', now()));
+  RAISE;
+END $$;
+
+-- programări (păstrează orele din fișierele existente)
+SELECT cron.schedule(
+  jobname  => 'refresh_tier_access_pool_daily',
+  schedule => 'TZ=Europe/Chisinau 0 3 * * *',
+  command  => $$SELECT public.f_cron_run_refresh_tier_access_pool_all();$$
+);
+
+SELECT cron.schedule(
+  jobname  => 'check_library_cap_daily',
+  schedule => 'TZ=Europe/Chisinau 5 3 * * *',
+  command  => $$SELECT public.f_cron_run_check_library_cap();$$
+);
+
+SELECT cron.schedule(
+  jobname  => 'preview_privileges_audit_daily',
+  schedule => 'TZ=Europe/Chisinau 12 3 * * *',
+  command  => $$SELECT public.f_cron_run_preview_privileges_audit();$$
+);
+
+Post‑run checks (copy/paste)
+-- RLS smoke: self‑only
+SELECT * FROM public.user_entitlements LIMIT 1;  -- ca authenticated: doar ale tale (sau none)
+
+-- Search ready
+SELECT * FROM public.rpc_search_neurons('prompt', 5, 0);
+
+-- Public surfaces
+SELECT * FROM public.v_bundle_public LIMIT 3;
+SELECT * FROM public.v_plans_public ORDER BY code;
+
+-- Delete guard
+BEGIN;
+  DELETE FROM public.neurons WHERE id = '<some_id>';  -- așteaptă EXCEPTION dacă există entitlements/receipts
+ROLLBACK;
+
+-- GDPR
+SELECT public.rpc_export_my_data();
+SELECT public.rpc_request_account_deletion('Please delete my account');
+
+-- Cron audit
+SELECT * FROM public.job_audit ORDER BY created_at DESC LIMIT 10;  -- doar admin
+
+
+Observații de integrare
+
+/bundles /pricing trag exclusiv din views publice; tabele brute rămân revocate. 
+
+Stripe: ingestează evenimente cu f_stripe_event_ingest și procesează cu f_stripe_event_process; user_purchases rămâne idempotent prin UNIQUE pe stripe_payment_intent_id. 
+
+Access FULL se livrează doar prin rpc_get_neuron_full (RLS + watermark + analytics). 
+
+Verdict: Compilează schema în dispozitiv — vitrina prin views, dreptul prin RPC, puterea prin RLS.

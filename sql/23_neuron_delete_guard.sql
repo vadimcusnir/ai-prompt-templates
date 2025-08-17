@@ -55,7 +55,7 @@ BEGIN
   -- Verifică abonamente active care au acces la neuronul
   SELECT COUNT(DISTINCT us.user_id)
   INTO v_subscriptions
-  FROM public.user_subscriptions us
+  FROM rpc_get_my_active_plan() us
   JOIN public.neurons n ON n.required_tier <= us.plan_tier
   WHERE n.id = p_neuron_id 
     AND us.status = 'active'
@@ -98,7 +98,7 @@ BEGIN
   -- Verifică abonamente active care au acces la bundle
   SELECT COUNT(DISTINCT us.user_id)
   INTO v_subscriptions
-  FROM public.user_subscriptions us
+  FROM rpc_get_my_active_plan() us
   JOIN public.bundles b ON b.required_tier <= us.plan_tier
   WHERE b.id = p_bundle_id 
     AND us.status = 'active'
@@ -302,8 +302,8 @@ BEGIN
   -- Obține user ID-ul curent
   v_user_id := auth.uid();
   
-  -- Hard-delete (cascade prin FK-uri)
-  DELETE FROM public.neurons WHERE id = p_neuron_id;
+  -- Soft-delete prin setarea published = false
+  UPDATE public.neurons SET published = false WHERE id = p_neuron_id;
   
   RETURN FOUND;
 END
@@ -333,18 +333,18 @@ BEGIN
     RAISE EXCEPTION 'Only admins can run cleanup';
   END IF;
   
-  -- Cleanup neurons vechi (90+ zile)
-  DELETE FROM public.neurons 
+  -- Cleanup neurons vechi (90+ zile) - soft delete
+  UPDATE public.neurons SET published = false 
   WHERE deleted_at < v_cleanup_date;
   GET DIAGNOSTICS v_neurons_deleted = ROW_COUNT;
   
-  -- Cleanup bundles vechi
-  DELETE FROM public.bundles 
+  -- Cleanup bundles vechi - soft delete
+  UPDATE public.bundles SET published = false 
   WHERE deleted_at < v_cleanup_date;
   GET DIAGNOSTICS v_bundles_deleted = ROW_COUNT;
   
-  -- Cleanup bundle_neurons vechi
-  DELETE FROM public.bundle_neurons 
+  -- Cleanup bundle_neurons vechi - soft delete
+  UPDATE public.bundle_neurons SET published = false 
   WHERE deleted_at < v_cleanup_date;
   GET DIAGNOSTICS v_bundle_neurons_deleted = ROW_COUNT;
   

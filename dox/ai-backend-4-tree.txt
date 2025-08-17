@@ -248,3 +248,374 @@ Execută în ordine (migrări noi)
 23_delete_guards.sql — blocare DELETE pe neuroni cu obligații.
 24_gdpr.sql — export + cerere ștergere.
 25_cron_job_audit.sql — job_audit + wrapping pentru cronuri.
+
+
+
+
+
+
+
+
+
+EXECUTĂ URMĂTOARELE LIVRABILE (ORDINE DE IMPACT → CODARE RAPIDĂ → DEPLOY FĂRĂ SURPRIZE)
+
+Compilează stratul DB într-un pachet de migrare „zero‑friction”.
+– Generează: db/migrations/[16..37]_*.sql + db/manifest.sql (ordonare deterministă) + db/smoke.sql (probe „copy/paste” din fișiere). Ancore: RLS self/admin, views publice, Stripe event log/DLQ, rate‑limit, guard anti‑DELETE, slug discipline, căutare, assets, GDPR, cron audit, plans sanitize. Accept: rulare idempotentă, toate smoke‑testele trec. 
+ 
+ 
+
+Scrie handlerul Stripe Webhook (Edge/Worker) „o singură ieșire”.
+– Generează: functions/stripe-webhook/index.ts. Verifică semnătura, parsează event, apelează public.consume_stripe_event(id,type,payload) cu service_role. Returnează 200 la idempotent (event existent). Env: STRIPE_WEBHOOK_SECRET, SUPABASE_SERVICE_KEY. Accept: simulează checkout.session.completed + customer.subscription.updated → inserții idempotente și upsert în DB. 
+
+Adaugă signer de asset-uri (download gated).
+– Generează: functions/asset-signer/index.ts. Intrare: asset_id; pas 1: rpc_get_neuron_asset_download(p_asset); pas 2: semnează URL Storage (bucket/path) și redă 302/URL. Respectă throttling 30/min (mesaj „Rate limit”). Accept: fără acces FULL → 403; cu FULL → URL semnat valabil ≤ 60s. 
+
+Livrează client TS pentru RPC (contract de FE stabil).
+– Generează: libs/supabase/rpc.ts cu wrapper-e tipate pentru:
+• rpc_search_neurons(q,limit,offset)
+• rpc_get_my_active_plan()
+• rpc_list_my_entitlements()
+• rpc_get_neuron_full(neuron_id)
+• rpc_list_neuron_previews(neuron_id)
+• rpc_get_neuron_asset_download(asset_id)
+Accept: toate funcțiile au tipuri derivate din supabase types, fără SELECT direct pe tabele. 
+
+Construiește /studio (admin) ca suprafață operațională reală.
+– Generează rute și ecrane:
+• /studio/alerts: system_alerts, job_audit (verde/roșu pe ultimele rulări). 
+
+• /studio/stripe: listează stripe_events (status ok/error), webhook_failures (DLQ) + acțiune „Reprocess” → public.reprocess_stripe_event(evt_id). 
+
+• /studio/bundles-watchdog: folosește f_cron_run_bundle_consistency_audit() (manual) și arată bundle_slug/neuron_slug problematice. 
+
+• /studio/pool: vizualizare tier_access_pool (selectate/target) pe ultima rulare. 
+
+• /studio/plans-sanity: v_plans_sanity + buton „Run assert” → f_assert_plans_sane(). 
+
+Accept: tot /studio rulează exclusiv cu f_is_admin(); niciun leak de tabele brute. 
+
+Încheie suprafața publică pentru monetizare.
+– Generează endpointuri FE:
+• /pricing → citește v_plans_public (cod, percent, monthly/annual). 
+
+• /bundles și /bundles/:slug → citește v_bundle_public (items = preview-only). 
+
+Accept: niciun SELECT pe bundles/plans; doar view‑uri. 
+
+Finalizează căutarea publică.
+– Generează /search (FE) cu highlight pe snippet (din rpc_search_neurons), fallback „cele mai noi” la query gol, accent‑insensitiv. Accept: EXPLAIN folosește GIN(tsv). 
+
+Asigură accesul „Free = 10% FULL”.
+– Generează test de FE: „azi în pool/free” → rpc_get_neuron_full succes; „nu în pool” → 403. Documentează clar în UI. Accept: free user fără subs are FULL pe 10% conform pool. 
+
+Implementă GDPR self‑serve + assisted delete end‑to‑end.
+– Generează: /account/export (buton → rpc_export_my_data descarcă JSON), /account/delete (buton → rpc_request_account_deletion, status live). Worker admin: f_process_account_deletion(req_id) + apel extern pentru Auth update dacă e necesar. Accept: entitlements/analytics șterse, purchases/receipts păstrate. 
+
+Normalizează slugurile în FE + validare de formă.
+– Generează util slugify() sincron cu f_slugify/f_is_valid_slug; în admin blochează submit dacă regex pică; tratează coliziunile case‑insensitive în UI. Accept: nicio creare/rename invalidă în /studio. 
+
+Închide bucla anti‑DELETE pe neuroni în UI (soft‑hide only).
+– Generează buton „Unpublish & remove from pool” care lovește rpc_soft_delete_neuron(neuron_id) și afișează motivul dacă triggerul anti‑DELETE ar fi lovit. Accept: niciun DELETE în FE. 
+
+Tratează „Rate limit” ca prim‑cetățean în client.
+– Generează mapare uniformă pentru Rate limit → UI 429 cu Retry‑After 60s; pentru download: același pattern. Accept: zero flood în logs, UX clar. 
+
+Ia decizii de preț „root=2” vizibile în UI.
+– Generează secțiune „De ce prețurile par numerologic aliniate” (micro-copy), aliniază planurile și verificate prin CHECK/trigger. Accept: f_assert_plans_sane() = OK în CI. 
+
+Observabilitate „cron ca istorie”.
+– Generează dashboard intern: ultimele rulări pentru refresh_tier_access_pool_all, check_library_cap, preview_privileges_audit, bundle_consistency_audit; payload JSON „expand”. Accept: verde/roșu lizibil + drill‑down. 
+
+CI/CD care nu iartă:
+– Generează .github/workflows:
+• db-apply.yml: rulează migrațiile pe staging, ANALYZE, smoke‑tests SQL (din fișiere). Fail hard. 
+
+• edge-deploy.yml: deploy functions (stripe-webhook, asset-signer); post‑deploy health check (selectează view‑uri publice).
+• e2e.yml: scenarii reale: search→unlock(60 ok/61 fail)→purchase simulat→subscription updated→asset download→GDPR export. 
+ 
+
+Semnale către Slack/Email din system_alerts.
+– Generează worker „alerts-bridge” care ascultă system_alerts și postează în Slack (categorii: cap, privileges, bundle_consistency). Accept: alertă în <60s de la inserție. 
+
+Seed minim pentru demo și QA.
+– Generează db/seed_minimal.sql: 3 neuroni (free/architect/initiate, published=true), 1 bundle valid, 1 plan set complet cu Stripe IDs dummy, 1 user admin. Accept: /pricing, /bundles, /search funcționale imediat. 
+
+Makefile + .env.sample determinist.
+– Generează:
+• Makefile: make db-up, make db-smoke, make edge-up, make seed, make studio.
+• .env.sample: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_SECRET_KEY, STORAGE_BUCKET=neurons.
+Accept: make seed && make edge-up produce un demo navigabil.
+
+Reguli FE de eroare unificate.
+– Generează intercepter: mapare mesaje din RPC (Not authenticated, Access denied, Rate limit, Neuron not found or unpublished) → staturi și UI standard. Accept: fără ramuri personalizate pe fiecare pagină. 
+
+Runbook operațional (1 pagină).
+– Generează RUNBOOK.md: „cum reprocesezi DLQ”, „cum promovezi un admin”, „cum rulezi assert pe plans”, „cum declanșezi manual watchdog‑uri cron”. Accept: fiecare pas are comanda SQL/HTTP exactă. 
+ 
+
+DETALII CHEIE PE CARE LE ÎNCHIZI ACUM (FĂRĂ NEGOCIERI)
+
+– Public = doar views (v_neuron_public, v_bundle_public, v_plans_public); full = exclusiv rpc_get_neuron_full (RLS + watermark + analytics). Blindează SELECT direct pe tabele brute. 
+
+– Admin = rol explicit (user_roles + f_is_admin) cu politici ALL pe tabelele operabile, fără relaxare publică. /studio consumă doar aceste politici. 
+
+– Stripe = un canal, dublu‑idempotent (event.id + payment_intent), DLQ cu reprocess. Niciun HTTP extern din handlerul SQL. 
+
+– Rate‑limit = 60 unlock/min/user (full) + 30 download/min/user (assets). Tratează „Rate limit” ca 429 în UI. 
+
+– Deleții = interzise pe neuroni cu obligații; folosește rpc_soft_delete_neuron (dezpublică + scoate din pool). 
+
+– Slug = unicitate case‑insensitive + regex strict + aliniere ltree; FE sincronizează slugify. 
+
+– GDPR = export JSON self‑serve + ștergere asistată (anonimizare PII; păstrezi purchases/receipts). 
+
+– Cron = wrappers cu job_audit + programare TZ Europe/Chisinau. 
+
+PSIHOLOGIC: taie tentația „doar să văd tabelele” — lucrează prin RPC-uri și views, altfel designul devine poros. SOCIAL: /studio nu e „admin generic”, e suprafața puterii — acceptă responsabilitatea auditabilă. COMERCIAL: root‑2, pool procentual și watermarkul transformă conținutul în activ financiar controlat.
+
+VERDICT: Vitrina vinde, seiful decide, cronul depune mărturie.
+
+
+
+
+
+
+
+
+Finalizează „arsenalul de generabile” ca să treci instant din design în cod și deploy. Ai tree-ul FE, rutele, gatingul, migrațiile și politicile RLS conturate; completează suprafața cu contracte, pipeline-uri, runbook-uri și șabloane executabile. Ţintește zero ambiguitate între intenție → API → UI → Stripe → audit. 
+ 
+ 
+ 
+
+1) Contracte API publice + catalog RPC (dosar „/contracts”)
+
+Generează openapi.yaml (3.1) pentru fațada publică (REST/Edge):
+/search → rpc_search_neurons, /bundles, /bundles/:slug, /pricing, /n/:slug/read (proxy RPC), /assets/:id/download (proxy RPC). Include 429 Rate limit, 403 Forbidden, 404 Not found, scheme de erori și headeri (x-request-id). Mapează strict la RPC-urile și view-urile expuse (preview vs full). 
+ 
+
+Generează „RPC Catalog.md”: semnături, input/output, RLS expectations, cine apelează (public / auth / admin), pentru:
+rpc_search_neurons, rpc_get_neuron_full (cu throttle), rpc_get_neuron_asset_download, rpc_list_neuron_previews, rpc_get_my_active_plan, rpc_list_my_entitlements, consume_stripe_event, reprocess_stripe_event. Include rate-limiturile din DB. 
+ 
+
+Generează „Error Codes.json”: mapare deterministă (e.g., E_RATE_LIMIT, E_ACCESS_DENIED, E_UNPUBLISHED, E_NOT_FOUND, E_STRIPE_META_MISSING, E_DANGEROUS_DELETE). Ancorează la excepțiile introduse în RPC/migrații. 
+
+Psihologic: scoate discuția din „merge / nu merge”; pui limbaj de contract.
+Social: forțezi echipa să vorbească pe aceeași gramatică (cod ↔ produs).
+Comercial: scurtezi POC→plată; vinde clar 429/403 ca „product boundary”.
+
+2) Edge Functions (Suprafață securizată)
+
+/edge/stripe-webhook.ts: verificare semnătură → consume_stripe_event(id,type,payload) (service role). Loghează 200 idempotent la dubluri; scrie în DLQ la erori. Include advisory lock semantic (pe PaymentIntent) doar în SQL, nu în cod. 
+
+/edge/sign-asset.ts: auth necesar → cheamă rpc_get_neuron_asset_download(asset_id) → semnează URL Storage → 302. Respectă 429 din RPC. 
+
+/edge/healthz: ping DB (SELECT 1), timp Stripe DNS, versiune build, hash migrații rulate.
+
+Psihologic: scoți „magia” din FE; muți controlul la margine.
+Social: separi clar cine vede „full” și de ce.
+Comercial: minimizezi chargeback fricțiunea (DLQ+reprocess).
+
+3) Env Map canonic + .env.example (dosar „/ops/env”)
+
+Generează „EnvContract.md” cu tabel: SUPABASE_URL, SUPABASE_ANON_KEY, SERVICE_ROLE_KEY, STRIPE_SECRET, STRIPE_WEBHOOK_SECRET, SITE_URL, JWT_AUDIENCE, CSP_REPORT_ONLY, LOG_LEVEL, BUCKET_NEURONS=neurons. Include sursa de adevăr pentru timezone cron. 
+
+Generează .env.example și politică de rotație (secrete Stripe/Supabase).
+
+Psihologic: tai anxietatea de „ce lipsește”.
+Social: aliniezi dev/stage/prod.
+Comercial: reduci timpi morți la incident.
+
+4) CI/CD „fără surprize” (dosar „/.ci”)
+
+Generează pipeline:
+
+Lint SQL + validare migrații în ordinea setată (16_… → 25_… → 33_… → 37_…).
+
+Rulează smoke SQL incluse în fișiere (RLS self, search, views publice, delete-guard, GDPR, cron audit). 
+ 
+
+Build Edge + FE; injectează CSP; rulează Playwright pe rutele critice din tree. 
+
+Plan DB (dry-run) + Apply pe stage; tag dacă trece.
+
+Generează Makefile cu ținte: dev, db:migrate, db:reset, ops:seed, ops:reprocess <evt>.
+
+Psihologic: creezi ritual; oprești improvizația.
+Social: standardizezi intrarea în joc a oricui.
+Comercial: scazi riscul de regresii plătite scump.
+
+5) Seeds „legale” + preflight
+
+Generează seed_plans.sql conform root=2 + assert, cu placeholder Stripe IDs și SELECT f_assert_plans_sane();. Fail hard dacă e murdar. 
+
+Generează seed_bundles.sql (exemplu 2–3 bundle-uri) + test v_rel_bundle_issues=0. 
+
+Generează seed_library_tree.sql cu 5–7 ramuri și mv_tree_counts refresh dacă există. 
+
+Psihologic: validezi modelul prin date, nu prin speranță.
+Social: design ↔ realitate, fără „placeholder perpetuu”.
+Comercial: „/pricing” și „/bundles” funcționează din prima.
+
+6) Test Pack determinist (dosar „/tests/sql” + „/tests/e2e”)
+
+RLS: scenarii „self-only” pe user_* + „admin” pe /studio. 
+
+Rate‑limit: 60 unlock/min user + 30 download/min; test 61→fail. 
+
+Stripe idempotency: același event.id de 2 ori → 200/false; același payment_intent → 1 purchase. DLQ la payload prost. 
+
+Pool gating: free/architect/initiate/elite → TRUE/ FALSE conform zi/pool. 
+
+Watchdogs: bundle consistency + cron audit înscriu payload. 
+
+E2E (Playwright): /n/:slug → upsell, /n/:slug/read → watermark, /checkout/success → entitlement vizibil în /account/entitlements. 
+
+Psihologic: teste ca gard de încredere.
+Social: scoți discuțiile despre „merge la mine”.
+Comercial: probezi promisiunea de acces.
+
+7) UX de monetizare complet (dosar „/web/flows”)
+
+Flow „Unlock”: preview → motiv acces + upsell sincronizat cu plan/pool. Text explicit pentru free=10% FULL/24h. 
+
+Flow „Receipt”: afișează snapshot + linkuri assets (dacă există), fără a expune content_full. 
+
+Flow „Rate limit”: 429 bar clar + timer 60s. 
+
+Psihologic: transformi „nu ai acces” în decizie de cumpărare.
+Social: justifici restricția fără frustrare.
+Comercial: crești conversia exact unde doare.
+
+8) Șabloane e‑mail (dosar „/ops/emails”)
+
+Magic link, reset, receipt, subscription changed, DLQ alert digest. Receipt include price, slug, time, hash (fără content_full). 
+
+„GDPR export ready” + „Deletion processed”. 
+
+Psihologic: recuperezi încredere prin transparență.
+Social: comunici schimbarea stării, nu doar starea.
+Comercial: fiecare mail e „micro‑vitrină”.
+
+9) CSP + Security headers (dosar „/ops/security”)
+
+Generează csp.json (script-src self + vercel/analytics dacă folosești, img-src Storage/CDN, connect-src Supabase URL, Stripe).
+
+Generează headers.json: Strict-Transport-Security, X-Content-Type-Options, Referrer-Policy, Permissions-Policy (camera/mic off).
+
+Politică anti-injecție prompt în preview (escape dur la snippet). 
+
+Psihologic: scazi anxietatea de supply-chain.
+Social: arăți maturitate de produs.
+Comercial: reduci suprafața de risc (asigurări, enterprise).
+
+10) Observabilitate completă (dosar „/studio/analytics”)
+
+Dashboard „Job Audit” din job_audit (ultimele rulari + payload). 
+
+„Stripe Intake”: ultimele stripe_events cu status, reprocess_stripe_event(id) pe buton. 
+
+„Bundle Watchdog”: din v_rel_bundle_issues + system_alerts. 
+
+Psihologic: transformi „cronul a rulat?” în vizibilitate.
+Social: împarți realitatea, nu scuzele.
+Comercial: identifici scurgerile de veniturile la timp.
+
+11) Runbook‑uri (dosar „/ops/runbooks”)
+
+„Stripe incident”: pași, reprocess_stripe_event, verificări în user_purchases/user_entitlements/purchase_receipts. 
+
+„Access leak audit”: rulează preview_privileges_audit wrapper, ce faci dacă >0. 
+
+„GDPR deletion”: procesare cu f_process_account_deletion, ce verifici post‑exec. 
+
+Psihologic: scoți „panică”, bagi procedură.
+Social: oricine din echipă poate interveni.
+Comercial: micșorezi timpul de recuperare.
+
+12) Tracking Plan v1 (dosar „/analytics/plan.json”)
+
+Evenimente: search, view_preview, unlock_attempt, unlock_success, download, checkout_started, checkout_completed, subscription_updated, rate_limited, gdpr_export, gdpr_delete_requested.
+
+Proprietăți: uid, neuron_id/slug, plan, pool_tier, stripe_pi, bundle_slug. Stochează în user_analytics; agregă în FE pentru UX. 
+ 
+
+Psihologic: numeri comportamente, nu păreri.
+Social: închizi discuții sterile.
+Comercial: optimizezi upsell la mm.
+
+13) Front‑end adapters tipate (dosar „/web/data”)
+
+Client TS typed pentru RPC‑uri + views publice (nu SELECT direct). Contracte: exact câmpurile publice. 
+
+Guards pe rute din tree (/n/:slug/read), fallback /auth/sign-in, /pricing. 
+
+Componente „State surfaces”: AccessDeniedCard, RateLimitCard(60s), UpsellCard(tier).
+
+Psihologic: UI spune adevărul sistemului, nu dorințe.
+Social: designul educă utilizatorul.
+Comercial: scade fricțiunea la upgrade.
+
+14) Legal pack (dosar „/legal”)
+
+Terms/Privacy/Cookies bazate pe artefactele tehnice (RLS, watermark, receipts, GDPR export & delete). Linkează „Cap 9.974€” și snapshot legal. 
+ 
+
+Policy „No deletion of sold content” (soft‑hide only). 
+
+Psihologic: legitimezi regulile dure.
+Social: setezi așteptări reale.
+Comercial: sprijini chargeback dispute cu text + date.
+
+15) Backup & Restore minimalist (dosar „/ops/backup”)
+
+Script: snapshot zilnic schema+data critice (excluzi analytics bulk), test restore pe staging, checksum.
+
+Playbook pentru revenire parțială (doar user_*, purchase_receipts, stripe_events)—nu atinge neurons publicate.
+
+Psihologic: liniște operațională.
+Social: nimeni nu mai „ezită” să migreze.
+Comercial: downtime = cost, îl reduci.
+
+16) Design tokens + i18n scaffolding
+
+tokens.json (spacing, radius, font scale, z‑index) pentru coerență;
+
+i18n: en/ro fișiere mesaje pentru: upsell, rate-limit, receipts, auth. Tree-ul are suprafețele pregătite. 
+
+Psihologic: consistența devine implicită.
+Social: comunicare clară cross‑cultural.
+Comercial: localizare rapidă la lansare.
+
+17) Risk register + decizii ireversibile (dosar „/ops/risk”)
+
+irrevocable.md: „nu ștergi neuroni vânduți”, „full numai via RPC”, „free=10% via pool”.
+
+risks.md: scraping (mitigare: throttle + watermark), dubluri slug (mitigare: index CI + slugify), bundle drift (mitigare: watchdog+alerts). 
+
+Psihologic: fixezi identitatea produsului în piatră.
+Social: eviți „schimbări tăcute”.
+Comercial: protejezi marja.
+
+18) Scaffold „operator CLI” (dosar „/ops/cli”)
+
+Comenzi: promote-admin <uid>, reprocess-stripe <evt_id>, pool:refresh, alerts:latest, gdpr:process <req_id>. Toate merg prin RPC-urile deja definite. 
+ 
+
+Psihologic: controlezi sistemul din limbaj, nu din UI.
+Social: reduce dependența de „cine știe consola”.
+Comercial: răspunzi la incident rapid.
+
+Acceptanță: „gata de coding & deploy” când…
+
+openapi.yaml + RPC Catalog generează client TS fără editări manuale.
+
+CI rulează toate smoke SQL din migrații și E2E pe rutele din tree, verzi. 
+ 
+
+Webhook Stripe idempotent (event log + DLQ) demonstrat cu test. 
+
+/studio afișează job_audit, bundle_issues, stripe_events. 
+
+Free‑tier deblochează 10% FULL din pool zilnic conform planului efectiv. 
+
+Verdict: „Compilează produsul în proceduri — vitrina vinde, RPC-ul semnează, RLS-ul guvernează.”

@@ -1,0 +1,1026 @@
+
+
+
+
+
+
+FE ↔ DB contracte executabile, zero ambiguitate. Implementează doar RPC‑uri și VIEWS publice. Nu atinge tabele brute (RLS + REVOKE deja blochează). 
+
+6.1 /api/search.ts — căutare publică, accent‑insensitivă, snippet sigur
+
+Ce implementezi
+
+searchNeurons(q, limit=20, offset=0) → rpc_search_neurons(p_q, p_limit, p_offset)
+
+Returnezi doar câmpuri de vitrină (id, slug, title, summary, required_tier, price_cents, rank, snippet).
+
+Dacă instanța ta rulează varianta RPC fără snippet, degradează la summary. 
+
+// /api/search.ts
+import { createClient } from '@supabase/supabase-js';
+
+export type PlanTier = 'free' | 'architect' | 'initiate' | 'elite';
+
+export type SearchRow = {
+  id: string;
+  slug: string;
+  title: string;
+  summary: string;
+  required_tier: PlanTier;
+  price_cents: number;
+  rank: number | null;
+  snippet?: string | null;
+};
+
+function supabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+export async function searchNeurons(q: string, limit = 20, offset = 0) {
+  const { data, error } = await supabase().rpc('rpc_search_neurons', {
+    p_q: q,
+    p_limit: limit,
+    p_offset: offset,
+  });
+
+  if (error) throw new Error(`[search] ${error.message}`);
+
+  const rows = (data ?? []) as SearchRow[];
+  // fallback snippet → summary (dacă RPC vechi nu returnează snippet)
+  return rows.map(r => ({ ...r, snippet: r.snippet ?? r.summary }));
+}
+
+
+Ancoră DB: RPC public cu snippet (headline) + rank, doar pe preview; zero risc de leak FULL. 
+
+6.2 /api/pricing.ts — pricing server‑first (citește, nu calculează)
+
+Ce implementezi
+
+getPlans() → SELECT * FROM v_plans_public (code, name, percent, monthly, annual).
+
+UI afişează cap‑banner dacă total_eur > cap_eur (sursa: v_library_total, deja în BE). 
+
+// /api/pricing.ts
+import { createClient } from '@supabase/supabase-js';
+import type { PlanTier } from './search';
+
+export type PlanPublic = {
+  code: PlanTier;
+  name: string;
+  percent: number;
+  monthly: number; // cents
+  annual: number;  // cents
+};
+
+function supabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+export async function getPlans(): Promise<PlanPublic[]> {
+  const { data, error } = await supabase()
+    .from('v_plans_public')
+    .select('*')
+    .order('code', { ascending: true });
+
+  if (error) throw new Error(`[pricing] ${error.message}`);
+  return (data ?? []) as PlanPublic[];
+}
+
+
+Ancoră DB: v_plans_public este suprafață publică curată pentru /pricing; tabelele brute sunt revocate. 
+
+6.3 /api/bundles.ts — bundle = vitrină agregată (items doar neuroni publicați)
+
+Ce implementezi
+
+getBundle(slug) → SELECT * FROM v_bundle_public WHERE slug=:slug (items = preview). Nu recomputa discount în FE. 
+
+// /api/bundles.ts
+import { createClient } from '@supabase/supabase-js';
+import type { PlanTier } from './search';
+
+export type BundleItem = {
+  id: string; slug: string; title: string; summary: string;
+  required_tier: PlanTier; price_cents: number;
+};
+
+export type BundlePublic = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string | null;
+  price_cents: number;
+  required_tier: PlanTier;
+  item_count: number;
+  items: BundleItem[]; // JSONB din view
+};
+
+function supabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+export async function getBundle(slug: string): Promise<BundlePublic | null> {
+  const { data, error } = await supabase()
+    .from('v_bundle_public')
+    .select('*')
+    .eq('slug', slug)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') return null; // no rows
+    throw new Error(`[bundle] ${error.message}`);
+  }
+  return data as BundlePublic;
+}
+
+
+Ancoră DB: v_bundle_public agregează doar neuroni published=true din v_neuron_public — zero FULL leak. 
+
+6.4 /api/neurons.ts — preview via VIEW, FULL via RPC + watermark
+
+Ce implementezi
+
+getNeuronPreview(slug) → SELECT * FROM v_neuron_public WHERE slug=:slug.
+
+getNeuronFullById(id) → rpc_get_neuron_full(p_neuron) → text cu <!-- wm:... -->; mapează erorile Not authenticated / Access denied / Rate limit. 
+
+// /api/neurons.ts
+import { createClient } from '@supabase/supabase-js';
+import type { PlanTier } from './search';
+
+export type NeuronPreview = {
+  id: string;
+  slug: string;
+  title: string;
+  summary: string;
+  required_tier: PlanTier;
+  price_cents: number;
+};
+
+export type FullContent = {
+  content: string;        // HTML/MD cu watermark inline
+  watermark?: string|null; // sha256 extras din <!-- wm:... -->
+};
+
+function supabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+export async function getNeuronPreview(slug: string): Promise<NeuronPreview | null> {
+  const { data, error } = await supabase()
+    .from('v_neuron_public')
+    .select('id, slug, title, summary, required_tier, price_cents')
+    .eq('slug', slug)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') return null;
+    throw new Error(`[neuron/preview] ${error.message}`);
+  }
+  return data as NeuronPreview;
+}
+
+export async function getNeuronFullById(id: string): Promise<FullContent> {
+  const { data, error } = await supabase()
+    .rpc('rpc_get_neuron_full', { p_neuron: id });
+
+  if (error) {
+    const msg = (error.message || '').toLowerCase();
+    if (msg.includes('not authenticated')) throw new Error('AUTH_REQUIRED');
+    if (msg.includes('access denied'))     throw new Error('FORBIDDEN');
+    if (msg.includes('rate limit'))        throw new Error('RATE_LIMIT');
+    throw new Error(`[neuron/full] ${error.message}`);
+  }
+
+  const content = String(data ?? '');
+  const m = content.match(/<!--\s*wm:([a-f0-9]{64})\s*-->/i);
+  return { content, watermark: m?.[1] ?? null };
+}
+
+
+Ancoră DB: preview prin v_neuron_public, FULL exclusiv prin rpc_get_neuron_full cu watermark + logging în user_analytics. 
+
+6.5 /api/account.ts — plan curent + entitlements materiale (self)
+
+Ce implementezi
+
+getMyActivePlan() → rpc_get_my_active_plan() (fallback free).
+
+listMyEntitlements() → rpc_list_my_entitlements() (slug, title, source, granted_at …). 
+
+// /api/account.ts
+import { createClient } from '@supabase/supabase-js';
+import type { PlanTier } from './search';
+
+export type MyPlan = { plan: PlanTier; percent: number; label: string };
+export type MyEntitlement = {
+  neuron_id: string;
+  slug: string;
+  title: string;
+  required_tier: PlanTier;
+  price_cents: number;
+  source: 'subscription'|'bundle'|'single';
+  granted_at: string; // ISO
+  published: boolean;
+};
+
+function supabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+export async function getMyActivePlan(): Promise<MyPlan> {
+  const { data, error } = await supabase().rpc('rpc_get_my_active_plan');
+  if (error) {
+    const msg = (error.message || '').toLowerCase();
+    if (msg.includes('not authenticated')) throw new Error('AUTH_REQUIRED');
+    throw new Error(`[account/plan] ${error.message}`);
+  }
+  return data as MyPlan;
+}
+
+export async function listMyEntitlements(): Promise<MyEntitlement[]> {
+  const { data, error } = await supabase().rpc('rpc_list_my_entitlements');
+  if (error) {
+    const msg = (error.message || '').toLowerCase();
+    if (msg.includes('not authenticated')) throw new Error('AUTH_REQUIRED');
+    throw new Error(`[account/entitlements] ${error.message}`);
+  }
+  return (data ?? []) as MyEntitlement[];
+}
+
+
+Ancoră DB: RPC‑uri helper expuse pentru FE; entitlements sunt mintuite automat la purchases (triggere). 
+
+6.6 /api/assets.ts — preview public, download gated (semnare server‑side)
+
+Ce implementezi
+
+listNeuronPreviews(neuron_id) → rpc_list_neuron_previews(p_neuron) (cover/thumb/gallery).
+
+getDownloadInfo(asset_id) → rpc_get_neuron_asset_download(p_asset) → {bucket, path, mime}; nu semna în browser — folosește o acțiune de server.
+
+Recomandare: server action /server/sign-asset.ts (service role) → URL semnat 60s.
+
+Gating = OR logic (entitlement ∨ elite ∨ pool@plan) verificat în RPC; rate‑limit 30/min în DB. 
+ 
+
+// /api/assets.ts
+import { createClient } from '@supabase/supabase-js';
+
+export type AssetPreview = {
+  id: string;
+  kind: 'cover'|'gallery'|'thumb';
+  mime_type: string;
+  storage_bucket: string;
+  storage_path: string;
+  width: number | null;
+  height: number | null;
+  title: string | null;
+  alt_text: string | null;
+  caption: string | null;
+  position: number;
+};
+
+export type AssetDownloadInfo = {
+  storage_bucket: string;
+  storage_path: string;
+  mime_type: string;
+};
+
+function supabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+export async function listNeuronPreviews(neuronId: string): Promise<AssetPreview[]> {
+  const { data, error } = await supabase()
+    .rpc('rpc_list_neuron_previews', { p_neuron: neuronId });
+  if (error) throw new Error(`[assets/previews] ${error.message}`);
+  return (data ?? []) as AssetPreview[];
+}
+
+export async function getDownloadInfo(assetId: string): Promise<AssetDownloadInfo> {
+  const { data, error } = await supabase()
+    .rpc('rpc_get_neuron_asset_download', { p_asset: assetId });
+  if (error) {
+    const msg = (error.message || '').toLowerCase();
+    if (msg.includes('not authenticated')) throw new Error('AUTH_REQUIRED');
+    if (msg.includes('access denied'))     throw new Error('FORBIDDEN');
+    if (msg.includes('rate limit'))        throw new Error('RATE_LIMIT');
+    if (msg.includes('not downloadable'))  throw new Error('NOT_DOWNLOADABLE');
+    throw new Error(`[assets/download] ${error.message}`);
+  }
+  // NOTE: semnarea URL se face în server (service role)
+  return (Array.isArray(data) ? data[0] : data) as AssetDownloadInfo;
+}
+
+
+Server action recomandată (semnare URL)
+
+// /server/sign-asset.ts  (Next.js Server Action / Route Handler)
+'use server';
+import { createClient } from '@supabase/supabase-js';
+
+const service = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // server-only
+);
+
+export async function signAssetURL(bucket: string, path: string, expiresIn = 60) {
+  const { data, error } = await service.storage
+    .from(bucket)
+    .createSignedUrl(path, expiresIn);
+  if (error) throw new Error(`[sign-asset] ${error.message}`);
+  return data.signedUrl;
+}
+
+
+Ancoră DB: RPC‑uri pentru preview/download; RLS pe neuron_assets permite public doar cover/thumb/gallery; download trece prin f_has_full_access + throttle în SQL. 
+ 
+
+DoD global (verificabil rapid)
+
+Niciun SELECT client pe tabele brute (neurons, bundles, plans etc.); numai v_* și rpc_*. 
+
+Preview: v_neuron_public, v_bundle_public, v_plans_public — toate public‑safe. 
+ 
+
+FULL: exclusiv rpc_get_neuron_full cu <!-- wm:... --> în payload (+ analytics ‘unlock’). 
+
+Gating: decizie în DB (f_has_full_access = entitlement ∨ elite ∨ pool@plan; opțional include free). 
+
+Assets: preview prin RPC list, download prin RPC + semnare server‑side; rate limit 30/min. 
+
+Notă operațională (UI/UX de livrat peste aceste API‑uri)
+
+States clare pentru /n/:slug/read: owned / elite-global / eligible-today / locked; calculezi state‑ul din răspunsurile RPC (nu reimplementezi logica). 
+
+Banner cap 9.974€: afișează când v_library_total.total_eur > cap_eur (fetch server‑side). 
+
+Verdict: leagă vitrina la creier printr‑un singur nerv — views pentru a vedea, rpc pentru a obține.
+
+
+
+
+
+
+
+“Gatekeeper” UI Acceptance (E2E + DB probes)
+
+Setează bateria ca un contract executabil între UI și DB. Testează UI prin acțiuni reale și verifică efectele în DB (RPC‑uri + views). Nu accepta “merge în demo”. Acceptă numai dovezi.
+
+0) Invariabile (garduri care nu se negociază)
+
+FULL doar prin RPC rpc_get_neuron_full(neuron_id); verifică acces (OR: entitlement ∨ elite ∨ pool@plan), marchează watermark <!-- wm:... -->, loghează unlock. Fără SELECT pe content_full. 
+
+Scor/Pool determinist 24h (eligibili: published = true și required_tier ≤ plan; procent 10/40/70/100). 
+
+Analytics minimă validată (f_log_ua: view|preview|unlock|download|rate, indexată pe 14 zile). 
+
+Download assets gated: preview doar cover|thumb|gallery; attachment|inline numai cu acces FULL + rate‑limit în RPC de download. 
+
+Pricing/Pachete numai din views publice: v_plans_public, v_bundle_public; cap 9.974€ în v_library_total; alerte în system_alerts. 
+ 
+
+1) Fixture minim (seed controlat, izolat)
+
+Crează 3 neuroni:
+
+N_ARCH (published=true, required_tier='architect', are 1 attachment).
+
+N_FREE (published=true, required_tier='free').
+
+N_UNPUB (published=false, doar pentru test bundle).
+Crează 1 bundle B_STARTER care include N_FREE + N_UNPUB.
+Utilizatori: U_FREE (fără sub, fără entitlement), U_ELITE (plan ‘elite’), U_OWNER (fără sub, dar primește entitlement pe N_ARCH).
+Note: eligibilitatea pool‑ului per plan vine din DB (determinist), iar gatingul folosește funcția unică f_has_full_access. 
+ 
+
+2) “Read Full” FĂRĂ acces → 403 + preview log
+
+Scop: confirmă că UI lovește exclusiv RPC și că pipeline‑ul scrie telemetria corectă.
+
+Precondiții: autentifică U_FREE. Alege N_ARCH (nu e în pool pentru free pentru că required_tier='architect' > free). 
+
+Acțiune UI: navighează /n/:slug/read → buton “Unlock” → cheamă rpc_get_neuron_full(N_ARCH.id).
+
+Așteptări UI: pagina arată 403/fallback explicit + CTA de upsell (nu randează full). Niciun GET/SELECT pe content_full. 
+
+Probe DB:
+
+există rând preview în user_analytics pentru (user_id=U_FREE, neuron_id=N_ARCH). 
+
+NU există unlock pentru acest cuplu.
+
+Interceptare rețea: blochează orice apel care încearcă select=content_full din tabelul neurons (trebuie să NU existe). 
+
+Criteriu “PASS”: 403 + preview log creat + zero acces DB la content_full.
+
+3) “Read Full” CU entitlement → 200 + wm + unlock log
+
+Scop: confirmă traseul complet de livrare legal‑grade.
+
+Precondiții: acordă entitlement U_OWNER→N_ARCH (materializat). 
+
+Acțiune UI: U_OWNER → /n/:slug/read → rpc_get_neuron_full(N_ARCH.id).
+
+Așteptări UI: 200; payload conține exact un token <!-- wm:<sha256> --> la final; randezi full. 
+
+Probe DB:
+
+există rând unlock în user_analytics cu metadata {'rpc':'rpc_get_neuron_full','allowed':true}. 
+
+f_has_full_access(U_OWNER, N_ARCH)=true. (explică “de ce” în debug: by entitlement). 
+
+Criteriu “PASS”: 200 + watermark HTML prezent + unlock log.
+
+4) Download attachment: 403 fără acces / 200 cu acces + rate‑limit on
+
+Scop: testează pathul gated + throttling anti‑scraping.
+
+Precondiții: N_ARCH are un asset attachment în neuron_assets. RLS permite public doar cover|thumb|gallery; attachment cere acces FULL. 
+
+Caz A (fără acces): U_FREE → click Download → rpc_get_neuron_asset_download(asset_id)
+
+UI: 403 “Access denied”.
+
+DB: nu apare download în user_analytics. 
+
+Caz B (cu acces): U_OWNER (are entitlement) → același click
+
+UI: 200, primești (bucket,path,mime) → semnezi URL la edge și descarci.
+
+DB: rând download în user_analytics + respectă rate‑limit (30/min) din RPC; la a 31‑a cerere: 429/“Rate limit” din EXCEPTION. 
+
+Criteriu “PASS”: blocare strictă fără acces; succes cu acces; 31‑a solicitare în <60s e respinsă.
+
+5) Pricing page → sursă DB, nu calcul + “root‑2” vizibil + Stripe IDs validate
+
+Scop: confirmă că UI citește, nu “inventează”.
+
+Precondiții: UI citește v_plans_public pentru cod/nume/procent/price și NU atinge tabelul plans direct; capul global & totalul există în v_library_total. 
+ 
+
+Acțiune UI: /pricing → fetch v_plans_public + fetch v_library_total.
+
+Așteptări UI:
+
+prețurile non‑free afișate exact cum vin din DB; Free=0€. 
+
+randează badge “root‑2” pe non‑free (doar afişare; regula de root=2 e validată în DB). 
+
+dacă total_eur > cap_eur din v_library_total → afișează banner “Cap 9.974€ depășit”. 
+
+Probe DB build‑gate (CI preflight): rulează f_assert_plans_sane() → fail hard dacă: procent≠10/40/70/100, non‑free fără Stripe IDs, sau prețuri non‑free nu respectă root=2. 
+
+Criteriu “PASS”: UI doar citește views; root‑2 vizibil; banner cap apare corect când simulezi cap mic; seed valid (Stripe IDs set la non‑free).
+
+6) Bundles → niciun item nepublic + watchdog zilnic în alerting
+
+Scop: vitrina nu scurge drafturi/unpublished; operatorul e alertat dacă cineva strică pachetele.
+
+Precondiții: /bundles/:slug citește exclusiv v_bundle_public (items vin doar din v_neuron_public ⇒ numai neuroni published=true). 
+
+Acțiune UI: deschide B_STARTER.
+
+Așteptări UI: NU arată N_UNPUB. item_count reflectă numai neuroni publicați. 
+
+Probe watchdog: rulează wrapper cron f_cron_run_bundle_consistency_audit(); dacă există neuroni nepublicați în bundle, inserează alertă bundle_consistency în system_alerts și jurnal în job_audit (admin‑only). 
+
+Criteriu “PASS”: UI nu listează item nepublic; alertă & audit apar când simulezi o anomalie.
+
+7) Matrice de stări “gatekeeper” (UI contracte vizuale)
+State UI	Condiție DB (adevăr unic)	Comportament UI
+locked	f_has_full_access = false	Preview + CTA upsell
+eligible-today	plan ∈ {free,architect,initiate} ∧ neuron ∈ pool(plan, azi)	Badge “in‑pool today” + buton “Unlock”
+owned	există user_entitlements(user, neuron)	FULL + watermark
+elite-global	plan = ‘elite’	FULL + watermark
+
+Sursa pentru toate: întreabă serverul, nu recalcula în FE. 
+ 
+
+8) Playbook E2E (Playwright/Cypress) — schelet executabil
+
+Pattern: acțiune UI → RPC → aserți UI + probe SQL (service‑role în test) → aserți că NU există acces direct la tabele brute.
+
+Helper Auth: login test cu token pentru U_FREE, U_OWNER, U_ELITE.
+
+Intercept: blochează orice rest/v1/neurons?select=content_full* (trebuie să nu existe). 
+
+Probe SQL (service‑role în test):
+
+SELECT COUNT(*) FROM user_analytics WHERE user_id=:uid AND neuron_id=:nid AND action='preview' (T2). 
+
+SELECT * FROM v_plans_public + SELECT * FROM v_library_total (T5). 
+ 
+
+SELECT * FROM v_bundle_public WHERE slug=:slug (T6). 
+
+SELECT * FROM system_alerts WHERE category='bundle_consistency' ORDER BY created_at DESC LIMIT 1 (T6). 
+
+9) Erori așteptate (mapare UI)
+
+Access denied (RPC full/asset) → 403 + motiv + CTA. 
+ 
+
+Rate limit (download) → 429 / mesaj “Rate limit”, retry după 60s. 
+
+Cap depășit (pricing) → banner pe baza v_library_total. 
+
+10) Semnale anti‑regresie (cron + observabilitate)
+
+refresh_tier_access_pool_all logat în job_audit (selected vs target per tier). 
+
+check_library_cap_and_alert logează exceeded/total în system_alerts + job_audit. 
+ 
+
+bundle_consistency_audit zilnic: 0 violări = verde; altfel warning. 
+
+Execută: checklist “PASS/FAIL” (rezumat)
+
+Read Full fără acces → 403 + preview log creat. 
+
+Read Full cu entitlement → 200 + <!-- wm:... --> + unlock log. 
+
+Download attachment → 403 fără acces; 200 cu acces; a 31‑a în <60s = 429. 
+
+Pricing → valori din v_plans_public; badge “root‑2”; banner cap pe v_library_total; seed plans valid prin f_assert_plans_sane(). 
+ 
+ 
+
+Bundles → niciun item nepublic; watchdog scrie system_alerts + job_audit. 
+ 
+
+Verdict: Blindează vitrina — UI arată doar ce DB semnează.
+
+
+
+
+
+
+
+
+8) Plan de foldere — structură “ready‑to‑code & deploy” (contracte ferme FE ↔ DB)
+
+A. Arbore de repo (monorepo simplu, Next.js/React)
+/src
+  /prompts
+    /edge/stripe-consume.md
+    /rpc/access-gate.md
+    /studio/pool-curator.md
+    /studio/alerts-operator.md
+    /gdpr/export-delete.md
+  /templates
+    /pages/
+      home.tsx
+      search.tsx
+      pricing.tsx
+      bundles/index.tsx
+      bundles/[slug].tsx
+      library/[[...path]].tsx
+      n/[slug]/index.tsx
+      n/[slug]/read.tsx
+      auth/sign-in.tsx
+      auth/sign-up.tsx
+      auth/magic-link.tsx
+      auth/reset.tsx
+      checkout/neuron/[slug].tsx
+      checkout/bundle/[slug].tsx
+      checkout/subscribe/[tier].tsx
+      checkout/success.tsx
+      checkout/canceled.tsx
+      account/index.tsx
+      account/subscription.tsx
+      account/purchases.tsx
+      account/entitlements.tsx
+      account/receipts.tsx
+      account/settings.tsx
+      studio/index.tsx
+      studio/neurons.tsx
+      studio/neurons/[id].tsx
+      studio/tree.tsx
+      studio/bundles.tsx
+      studio/bundles/[id].tsx
+      studio/plans.tsx
+      studio/pool.tsx
+      studio/analytics.tsx
+      studio/alerts.tsx
+      studio/receipts.tsx
+      studio/settings.tsx
+      studio/guard.tsx
+      studio/users.tsx
+      legal/terms.tsx
+      legal/privacy.tsx
+      legal/cookies.tsx
+      404.tsx
+      403.tsx
+    /components/
+      NeuronCard.tsx
+      BundleCard.tsx
+      BundleDetail.tsx
+      PlanMatrix.tsx
+      PoolBadge.tsx
+      AccessGuard.tsx
+      ReceiptList.tsx
+      AssetGallery.tsx
+      DownloadButton.tsx
+      SearchBox.tsx
+      SearchResults.tsx
+    /forms/
+      AdminNeuronForm.tsx
+      BundleComposer.tsx
+      PlansEditor.tsx
+  /logic/
+    pricing.ts
+    bundles.ts
+  /symbols/
+    tokens.css
+    watermark.md
+    slug-discipline.md
+    pool-signal.md
+  /access/
+    gate.client.md
+  /scoring/
+    listing.md
+  /classify/
+    taxonomy.md
+  /api/
+    search.ts
+    pricing.ts
+    bundles.ts
+    neurons.ts
+    account.ts
+    assets.ts
+
+/tests/acceptance/gatekeeper.spec.ts
+/tests/watchdogs/bundles.spec.ts
+/styles/globals.css
+/types/db.ts
+/README.md
+/.env.example
+
+
+Regulă globală: nu citi niciodată content_full din client; livrezi FULL exclusiv prin rpc_get_neuron_full() (watermark + analytics). Views publice: v_neuron_public, v_bundle_public, v_plans_public. Confirmat în migrații și RPC‑uri. 
+ 
+
+B. Conținut minim obligatoriu per fișier (contract + DoD)
+/prompts/edge/stripe-consume.md
+
+Scop: verifici semnătura Stripe, apelezi o singură funcție SQL idempotentă:
+SELECT public.consume_stripe_event($id,$type,$payload::jsonb);
+
+I/O:
+In: Stripe-Signature (header), body brut.
+Out: 200 OK indiferent de re‑livrări; true|false (procesat / duplicat).
+
+Contract DB: public.consume_stripe_event înscrie stripe_events, procesează checkout.session.*, payment_intent.succeeded, customer.subscription.*; idempotency pe event.id + pe payment_intent; minting auto entitlements & receipts prin triggere. 
+
+DoD: o singură inserare în user_purchases per payment_intent; user_entitlements și purchase_receipts apar prin triggere. 
+
+/prompts/rpc/access-gate.md
+
+Scop: livrezi FULL numai prin rpc_get_neuron_full(:neuron_uuid); UI nu atinge content_full.
+
+Acces: OR logic – entitlement ∨ elite ∨ pool@plan; opțional include free (10%). 
+ 
+
+DoD: răspunsul conține <!-- wm:... -->; eveniment unlock logat în user_analytics. 
+
+/prompts/studio/pool-curator.md
+
+Scop: operare pool determinist pe 24h (10/40/70/100%); raportezi refresh_tier_access_pool_all + audit în job_audit. 
+ 
+
+DoD: în UI /studio/pool afișezi selected_count/target_count per tier și timestamp cron (03:00 Europe/Chisinau). 
+
+/prompts/studio/alerts-operator.md
+
+Scop: manual de triere alerte: cap 9.974€, bundle consistency, privilegii preview/full; citește system_alerts + job_audit. 
+ 
+
+DoD: fiecare alertă are “Fix → Probe SQL” (view‑uri dedicate: cap check, bundle watchdog, privileges audit). 
+
+/prompts/gdpr/export-delete.md
+
+Scop: rpc_export_my_data() (self‑serve JSON: subs/purchases/entitlements/analytics_30d); delete asistat (anonimizare, păstrezi probe). 
+
+DoD: receipts rămân append‑only; export include v_user minim, subs/purchases/ents/ua_30d. 
+
+/templates/pages/*
+
+Mapare rute → IA Tree (public/gated/admin) exact ca în specificație. 
+
+Contracte:
+
+home.tsx: top neuroni din v_neuron_public.
+
+search.tsx: FTS prin rpc_search_neurons. 
+
+pricing.tsx: planuri din v_plans_public + banner cap (via v_library_total). 
+ 
+
+bundles/*: doar v_bundle_public (items publicate). 
+
+library/*: v_tree_public. 
+
+n/[slug]/index.tsx: preview din v_neuron_public. 
+
+n/[slug]/read.tsx: FULL via rpc_get_neuron_full + watermark + log. 
+
+checkout/*: Stripe (one‑off/bundle/subscribe) → webhookul alimentează consume_stripe_event. 
+
+account/*: rpc_get_my_active_plan(), rpc_list_my_entitlements(), liste “self‑only” (RLS). 
+
+studio/*: admin‑only prin RLS f_is_admin(). 
+
+/templates/components
+
+NeuronCard.tsx: title, summary, price, tier badge — sursă v_neuron_public. 
+
+BundleCard.tsx / BundleDetail.tsx: items din v_bundle_public (doar publicați). 
+
+PlanMatrix.tsx: v_plans_public (percent, monthly, annual). 
+
+PoolBadge.tsx: “selected/target” + pool_date (raport & v_tier_pool_active). 
+
+AccessGuard.tsx: buton “Unlock” → rpc_get_neuron_full. 
+
+ReceiptList.tsx: listă “append‑only”, vizibilă doar owner (RLS). 
+
+AssetGallery.tsx + DownloadButton.tsx: preview public via rpc_list_neuron_previews; download via rpc_get_neuron_asset_download (gated + rate‑limit). 
+
+SearchBox.tsx + SearchResults.tsx: rpc_search_neurons (unaccent, tsv). 
+
+/templates/forms
+
+AdminNeuronForm.tsx: slug discipline (validator regex), avertizezi la schimbare slug; mapare ltree label. 
+
+BundleComposer.tsx: watchdog vizual pentru neuroni nepublicați (v_rel_bundle_issues). 
+
+PlansEditor.tsx: guard root=2 + Stripe IDs obligatorii (validate în DB). 
+
+/logic/pricing.ts
+
+getPlans(): SELECT * FROM public.v_plans_public;
+
+getLibraryTotal(): SELECT * FROM public.v_library_total;
+
+UI: dacă total_eur > cap_eur → badge “cap depășit”. 
+ 
+
+/logic/bundles.ts
+
+Render doar v_bundle_public; nu recomputa discount în FE. 
+
+/symbols/tokens.css
+
+Tier → culoare/icon: free | architect | initiate | elite (ENUM + percent). 
+ 
+
+Badge pool 10/40/70/100: aliniat f_plan_percent_access. 
+
+/symbols/watermark.md
+
+Spec: <!-- wm:sha256(user:neuron:timestamp) --> (concat exact ca în RPC). 
+
+Semnificație: trasabilitate legală a livrării FULL.
+
+/symbols/slug-discipline.md
+
+Regex: ^[a-z0-9]+(-[a-z0-9]+)*$ + unicitate lower(slug); f_slugify + pod f_slug_to_ltree_label. UI blochează submit dacă nu trece. 
+
+/symbols/pool-signal.md
+
+Insignă “in‑pool today” determinist 24h; date din v_tier_pool_active; fără random client‑side. 
+
+/access/gate.client.md
+
+Regulă unică: întreabă serverul; nu reimplementezi accesul în FE.
+
+Stări UI: locked / eligible-today / owned / elite-global.
+
+Fallback: 403 explicat + CTA. Sursă: f_has_full_access (+ varianta cu free 10%). 
+ 
+
+/scoring/listing.md
+
+Ordonare în FE doar pe câmpuri servite (ex. popularitate 14d). Scor pe 14 zile: v_ua_popularity_14d; blend calculat în DB pentru pool. Telemetrie prin f_log_ua. 
+ 
+
+/classify/taxonomy.md
+
+Clasificare vizuală: library_tree (ltree) + tags; slug → label via f_slug_to_ltree_label; arată număr copii via v_tree_public. 
+ 
+
+/api/search.ts
+
+RPC: rpc_search_neurons(q,limit,offset) (unaccent, tsv). 
+
+/api/pricing.ts
+
+View: v_plans_public. 
+
+/api/bundles.ts
+
+View: v_bundle_public WHERE slug=:slug. 
+
+/api/neurons.ts
+
+Preview: v_neuron_public WHERE slug=:slug.
+
+Full: rpc_get_neuron_full(id); 403 → motiv + upsell. 
+
+/api/account.ts
+
+RPC: rpc_get_my_active_plan() + rpc_list_my_entitlements(). 
+
+/api/assets.ts
+
+RPC: rpc_list_neuron_previews(neuron_id) + rpc_get_neuron_asset_download(asset_id) (rate‑limit). 
+
+C. Reguli operaționale (build‑time & runtime) — aplică fără dezbatere
+
+RLS‑first: paginile /account și /studio afișează doar ce întorc RPC‑urile “self/admin”. 
+
+Vitrină vs. Seif: public doar v_*; FULL doar rpc_get_neuron_full (watermark + log). 
+
+Stripe: webhook unic → consume_stripe_event (event log + DLQ). 
+
+Pool: nu genera random în FE; citește raportul zilnic + v_tier_pool_active. 
+
+Pricing: citește, nu calcula; cap 9.974€ din v_library_total. 
+
+Slugs: validează client‑side cu același regex; nu accepta submit dacă nu trece. 
+
+Assets: preview public (cover/thumb/gallery) prin RLS; download prin RPC cu throttling. 
+
+D. “Ready‑to‑deploy” checklist (execută)
+
+.env.example: NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE (edge only), STRIPE_WEBHOOK_SECRET.
+
+CI: lint → typecheck → test:acceptance (gatekeeper) → build → deploy.
+
+Teste acceptance (minim):
+– Read Full fără acces → 403 + preview log;
+– Read Full cu entitlement → 200 + watermark + unlock log;
+– Download fără acces → 403; cu acces → 200, throttling activ;
+– Pricing page citește v_plans_public și validează Stripe IDs;
+– Bundles nu includ item nepublic, watchdog zilnic loghează anomalii. 
+ 
+
+Verdict: păstrează vitrina curată, seiful încuiat, semnătura vizibilă.
+
+
+
+
+
+
+
+
+9) Rute & permisiuni — rezumat executabil pentru FE
+TaIe tot zgomotul. Leagă fiecare pagină de un singur “adevăr” în DB. Fără SELECT pe tabele brute. Doar views + RPC. UI‑ul doar întreabă; serverul decide.
+
+A. Public (fără login) — vitrină, nu seif
+
+Surse permise
+
+Cards/preview neuroni: v_neuron_public — doar published=true, fără content_full. Folosește pentru Home, Library, Neuron Preview. 
+
+Sidebar & tree counts: v_tree_public — nume + număr copii (din MV). 
+
+Bundles (list + detail): v_bundle_public — items extrase DOAR din v_neuron_public (zero leak). 
+
+Plans/Pricing: v_plans_public — code,name,percent,monthly,annual. 
+
+Search (FTS, unaccent): rpc_search_neurons(q,limit,offset) — returnează doar câmpuri publice + rank/snippet. 
+
+Rute FE mapate
+
+/, /library/*, /n/:slug (preview), /bundles, /bundles/:slug, /pricing, /search → doar v_* / rpc_search_neurons. Arhitectura de rute e deja confirmată în IA tree. 
+
+Invariante
+
+Niciun acces la content_full în public. Tot full se livrează exclusiv prin RPC gated. 
+
+Tabelele brute pentru bundles/plans sunt REVOKE pentru clienți; publicul vede doar v_*. 
+
+B. Auth (member) — drepturi materiale, nu „presupuneri”
+
+Surse permise (doar RPC; RLS pe “user‑owned”)
+
+Planul tău efectiv: rpc_get_my_active_plan() → derivează din user_subscriptions (fallback free). Pentru badge & gating UI. 
+
+Ce deții: rpc_list_my_entitlements() → neuroni materializați în user_entitlements. Pentru /account/entitlements. 
+
+Full content: rpc_get_neuron_full(neuron_id) → verifică OR: entitlement ∨ elite ∨ pool@plan; loghează analytics; aplică watermark HTML. FE nu vede niciodată coloana content_full. 
+ 
+
+Downloads assets (PDF/ZIP): rpc_get_neuron_asset_download(asset_id) → aceleași reguli de acces ca full, + rate‑limit la nivel DB; după OK, semnezi URL și descarci. 
+
+Regula de acces (unică, la server)
+
+f_has_full_access(user, neuron) = TRUE dacă:
+(1) ai entitlement materializat sau (2) planul tău = elite sau (3) neuronul e în pool pentru planul tău în ziua curentă (determinist 24h). FE nu reimplementează; doar întreabă. 
+
+Dacă activezi “Free = 10% FULL”, DB extinde regula cu plan='free' în același OR. FE nu schimbă nimic. 
+
+Rute FE mapate
+
+/n/:slug/read → load preview (v_neuron_public), apoi “Unlock” → rpc_get_neuron_full(id); fallback = mesaj 403 + CTA plan/checkout. 
+
+/account/* → exclusiv rpc_* de mai sus; RLS “self‑only” pe subs/purchases/entitlements/receipts protejează suprafața. 
+
+Analytics & watermark (obligatorii, server‑first)
+
+Eșec acces full → log preview în user_analytics; succes → log unlock + inserează <!-- wm:sha256(...) --> în payload. FE doar afișează. 
+ 
+
+C. Admin (/studio) — scrii direct în creier, dar sub RLS
+
+Cine este admin
+
+user_roles(role='admin') + helper f_is_admin(); toate politicile /studio sunt USING/ WITH CHECK f_is_admin(auth.uid()). 
+
+Ce controlezi
+
+CRUD pe: neurons, library_tree(+pivot), bundles(+pivot), plans, tier_access_pool, pricing_rules, settings, system_alerts. RLS admin „ALL”; publicul rămâne pe v_*/RPC. 
+
+Rute FE mapate
+
+/studio/* din IA tree (neurons, tree, bundles, plans, pool, analytics, alerts, receipts, settings, guard, users). Toate se bazează pe RLS admin, nu pe privilegii FE. 
+
+D. Contracte UI → HTTP (stateless, decodare minimă)
+
+Stări UI (derivate din server, nu din FE):
+
+locked = f_has_full_access=false → arată preview + CTA (plan/checkout). 
+
+eligible-today = în pool pentru planul curent (24h determinist) → „Unlock azi”. (opțional: afișează insigna din v_tier_pool_active). 
+
+owned = entitlement materializat → full permanent. 
+
+elite-global = plan = elite → full peste tot. 
+
+Mapare erori (normalizează în FE):
+
+401 (nu ești logat) → cere login.
+
+403 „Access denied” de la rpc_get_neuron_full/rpc_get_neuron_asset_download → afișează motiv + upsell. 
+ 
+
+429 „Rate limit” (downloads) → cooldown vizual 60s. 
+
+E. Șine de protecție (anti‑leak, anti‑shadow logic)
+
+Preview doar din views: v_neuron_public, v_tree_public, v_bundle_public, v_plans_public. REVOKE pe tabele brute pentru clienți. 
+
+Full doar prin RPC securizat: rpc_get_neuron_full (SECURITY DEFINER, verifică acces, loghează, watermark). 
+
+Self‑owned doar proprietar: RLS “self‑only” pe user_subscriptions, user_purchases, user_entitlements, purchase_receipts. 
+
+Assets: preview (cover/gallery/thumb) public doar dacă neuronul e publicat; download/inline prin RPC + gating + rate‑limit. 
+
+IA tree confirmă public/auth/admin pe fiecare rută — folosește-l ca listă de control UI. 
+
+F. “AccessGuard” — flux minimal (pseudo‑contract)
+
+Preview load: SELECT * FROM v_neuron_public WHERE slug=:slug → primești id. 
+
+Buton Unlock (autentificat): rpc_get_neuron_full(id) →
+
+OK: rand → conținut + <!-- wm:... -->; log unlock.
+
+Fail: 403 → arată motiv + CTA plan/checkout. 
+
+Download asset: rpc_get_neuron_asset_download(asset_id) → primești (bucket,path,mime) → semnezi URL → descarci; Rate limit → cooldown. 
+
+Account header: rpc_get_my_active_plan() → badge plan + percent; /account/entitlements → rpc_list_my_entitlements(). 
+
+G. “Forward‑thinking” (2–3 ani) — pregătește loc pentru extinderi fără a schimba contractele
+
+Toggle “Free 10% FULL” doar în DB: FE nu schimbă fluxul; f_has_full_access rămâne the single source of truth. 
+
+Pool vizibil granular: expune v_tier_pool_active pentru insigne „in‑pool today” → convertește fără discounting. 
+
+Observabilitate /studio: citește system_alerts + job_audit ca health de permisiuni/pool/cap. 
+ 
+
+Verdict simbolic: Vitrina întreabă, seiful decide, watermarkul semnează.

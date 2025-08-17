@@ -1,0 +1,520 @@
+
+
+
+
+
+Canonul UI/UX pentru „ai‑prompt‑templates” (gata de code & deploy)
+
+0) Principii dure (de la backend la UI)
+
+Preview ≠ Full. Livrează preview din views publice și full strict prin RPC cu watermark; nu face SELECT direct pe tabele. (UI consumă v_neuron_public, v_tree_public; full vine doar din rpc_get_neuron_full.) 
+
+State-uri de acces deterministe. Acces FULL = entitlement OR plan elite OR neuron în pool pentru planul curent. UI trebuie să explice motivul și să ofere CTA de upsell. 
+
+Pool zilnic (24h). Resetează la 03:00 (Europe/Chisinau). Marchează „Today’s access” în UI și invalidează cache-urile în acel punct. 
+
+Contracte Stripe sunt idempotente. UI/checkout setează metadata.uid,kind,neuron_id|bundle_id; backend procesează o singură dată (event log + DLQ). Nu duplica butoane. 
+
+Cap 9.974€ vizibil. Dacă v_library_total.total_eur > cap_eur, arată banner „Cap depășit” pe /studio și (opțional) în /pricing. 
+
+1) Rutare & identitate URL (SSR‑first, canonical)
+
+Respectă tree‑ul de rute. Implementă exact structura din fișierul „IA – Tree complet de pagini”; păstrează /n/:slug → preview și /n/:slug/read → full gated. 
+
+Slug canonical (lowercase, strict). Redirect 301 la slug normalizat (regex ^[a-z0-9]+(-[a-z0-9]+)*$), pentru a oglindi triggerele de normalizare și unicitățile case‑insensitive din DB. 
+
+2) Surse de date FE (numai ce e „safe”)
+
+Public: v_neuron_public, v_tree_public, și v_bundle_public, v_plans_public pentru monetizare. Fără acces la tabele brute. 
+ 
+
+RPC‑uri obligatorii:
+– rpc_get_neuron_full(neuron_id) → HTML text + <!-- wm:... --> (nu afișa watermarkul, dar păstrează-l în răspuns). Log automat „unlock/preview”. 
+
+– rpc_search_neurons(q, limit, offset) → FTS accent‑insensitiv (title+summary). Folosește pentru /search. 
+
+– rpc_list_neuron_previews(neuron_id) & rpc_get_neuron_asset_download(asset_id) pentru imagini/atașamente (download numai dacă ai FULL). 
+
+– rpc_get_my_active_plan() & rpc_list_my_entitlements() pentru /account. 
+
+3) Model UI de acces (state machine simplu)
+
+States: PREVIEW_ONLY (public), FULL_BY_ENTITLEMENT, FULL_BY_ELITE, FULL_BY_POOL_TODAY, DENIED. Determină din: rpc_get_my_active_plan(), v_tier_pool_active, și rezultatul rpc_get_neuron_full. Afișează motivul și CTA coerent. 
+ 
+
+Free = 10% FULL. Dacă planul efectiv e free, arată insigna „10% Today” doar pentru neuroni aflați în pool('free') azi; restul → preview + CTA upgrade. 
+
+4) Neuron Preview (/n/:slug)
+
+Date: title, summary, required_tier, price_cents din v_neuron_public; cover/thumb/galerie din rpc_list_neuron_previews. 
+ 
+
+CTA dinamic:
+– FULL_BY_POOL_TODAY → „Read now (included today)”.
+– PREVIEW_ONLY → „Unlock single” + „Subscribe tier X” (alege din v_plans_public). 
+
+Micro‑telemetrie: f_log_ua('view'| 'preview') e deja automatizabil; păstrează evenimentul când cardul e vizibil >800ms. 
+ 
+
+5) Neuron Full (/n/:slug/read)
+
+Obținere: cheamă rpc_get_neuron_full(neuron_id); tratează erorile: Not authenticated, Access denied, Rate limit. Afișează motiv + CTA. 
+
+Watermark: lasă intact în HTML (comentariu) — nu îl elimina, nu îl arăta. 
+
+Download assets: butoane separate care lovesc rpc_get_neuron_asset_download(asset_id). Dacă 429→ explică „Prea multe descărcări. Reîncearcă în 1 minut.” 
+
+6) Căutare (/search)
+
+Backend: rpc_search_neurons (tsvector STORED + unaccent + GIN). Fără select pe content_full. 
+
+UI: query ≥2 char; highlight snippet; ordonează pe rank și created_at. Paginare 20/ pagină. 
+
+7) Bundles (/bundles, /bundles/:slug)
+
+Sursă: v_bundle_public — include doar neuroni published și item_count. 
+
+Carduri: arată title, description, price_cents, item_count + preview din items[]. Fără leak de full. 
+
+Watchdog: dacă /studio semnalează „bundle_consistency” → marchează bundle‑ul ca „maintenance” în UI. 
+
+8) Pricing (/pricing)
+
+Sursă: v_plans_public (code, name, percent, monthly, annual). Nu afișa Stripe IDs. 
+
+Copy clar: Free = „10% FULL/zi în rotație”; Architect = „40%”; Initiate = „70%”; Elite = „100%”. Leagă de cronul 03:00. 
+ 
+
+9) Checkout (/checkout/*)
+
+One‑off & Bundle: setează metadata.uid, kind, neuron_id|bundle_id; currency EUR; după success, UI merge la /checkout/success și revalidează /account. 
+
+Subscriptions: price.id trebuie mapat în DB la plan (plans.stripe_price_id_*). Dacă lipsește → oprește fluxul cu mesaj „Plan indisponibil”. 
+
+Idempotency UI: buton „Pay” devine disabled + spinner până primim confirmarea. Backend este deja idempotent pe event.id și payment_intent. 
+
+10) Account (/account/*)
+
+Overview: arată planul din rpc_get_my_active_plan() + ultimele „unlock” din user_analytics. 
+ 
+
+Entitlements: listă din rpc_list_my_entitlements() (sursă de adevăr pentru „Owned”). 
+
+Receipts: listing append‑only din purchase_receipts; nu permite edit/ delete în UI. 
+
+11) Librărie & Sidebar (/library/*)
+
+Tree: construiește din v_tree_public; numără copii din MV. Ordine stabilă. 
+
+Carduri: doar preview (din v_neuron_public); badge „In pool today” dacă neuronul e în v_tier_pool_active pentru planul utilizatorului. 
+
+12) Studio (/studio/*) — suprafață admin
+
+Vizibil doar admin. Admin definit prin user_roles + f_is_admin(); RLS dă ALL pe conținut/structură/setting‑uri. Ascunde /studio pentru non‑admin. 
+ 
+
+Panouri esențiale: Pool (selectat/target per tier), Alerts (cap, bundle consistency, preview privileges), Job Audit (ultimele rulări). 
+ 
+
+13) Assets (imagini/fișiere)
+
+Preview public: cover|thumb|gallery vizibile doar dacă neuronul e published; listă via RPC rpc_list_neuron_previews. 
+
+Download gated: attachment|inline doar prin rpc_get_neuron_asset_download + semnare URL server‑side; tratează 429/„Rate limit”. 
+
+14) Telemetrie & rating (minim, robust)
+
+Evenimente UI: view, preview, unlock, download, rate. Rating ∈ [1..5]; validează numeric înainte de POST. 
+
+Scor feed pool: nu agrega client‑side; backend are v_ua_popularity_14d; UI doar îl consumă în /studio. 
+
+15) Observabilitate & semnale
+
+Bannere automate:
+– Cap depășit (din v_library_total/alertă).
+– Bundle inconsistency (din system_alerts + watchdog).
+– Preview privilege violations (audit zilnic). 
+ 
+ 
+
+Job audit UI: listă job_audit (admin‑only) cu ok/payload/created_at. 
+
+16) Error taxonomy (mapare la UI)
+
+401 Not authenticated → modal /auth.
+
+403 Access denied (gating) → card cu motiv (no entitlement, not in today’s pool, plan insufficient) + CTA upgrade/unlock. 
+
+404 Slug invalid/absent (canon) → redirect la canonical sau pagina 404. 
+
+429 Rate limit pe read/download → mesaj „Încearcă din nou în 1 minut”. 
+
+17) Performance + accesibilitate
+
+Strategie imagine: thumb → LQIP/blur, cover → responsive srcset.
+
+SSR pentru /, /library, /bundles, /pricing; CSR pentru /n/:slug/read după gate.
+
+A11y: alt_text din neuron_assets; navigare tastatură completă. 
+
+18) Cache & revalidare
+
+Chei cache: plan|pool_date (și slug). Revalidează global la 03:00 Europe/Chisinau. 
+
+Evită stale gating: niciodată nu memora rezultatul rpc_get_neuron_full; doar cache pe preview. 
+
+19) Compliance UX
+
+GDPR Export: buton în /account → cheamă rpc_export_my_data() și descarcă JSON.
+
+Delete request: UI „request deletion”; explică: bonurile (receipts) rămân ca probă legală. 
+ 
+
+20) Definition‑of‑Done (DoD) per pagină — minimul executabil
+
+Home: top neuroni = preview din v_neuron_public; CTA în funcție de plan. 
+
+/n/:slug: preview + assets publice; buton „Read full” → rpc_get_neuron_full. 
+
+/n/:slug/read: rulează gate, afişează full + watermark (invizibil). 
+
+/search: rpc_search_neurons; paginare. 
+
+/bundles: v_bundle_public; carduri cu item_count. 
+
+/pricing: v_plans_public; copy cu procentele 10/40/70/100. 
+
+/account: rpc_get_my_active_plan, rpc_list_my_entitlements, receipts. 
+ 
+
+/studio: admin‑only; tablouri pentru pool/alerts/audit. 
+ 
+
+21) Matrice de test (critică)
+
+Gating combinatoric: {free, architect, initiate, elite} × {în pool/nu} × {are entitlement/nu}. 
+
+Cron flip: înainte/după 03:00 — UI invalidează și re‑etichetează „Today”. 
+
+Stripe idempotency: dublu click pe „Pay” + duplicate webhooks → UI rămâne consistent (o singură achiziție). 
+
+Slug canonical: /n/AI-Frameworks → redirect la /n/ai-frameworks. 
+
+Verdict: Construiește vitrină din views, acces din funcții, bani din RPC‑uri — și lasă legea (RLS/cron/idempotency) să fie designul tău invizibil.
+
+
+
+
+Generează FE‑ul ca interfață a unui contract: preview → full (gated) → audit legal. Regulile de mai jos leagă direct UI/UX de regulile din DB & RPC, fără spațiu pentru “interpretări”.
+
+0) Surse de adevăr (nu negocia)
+
+Preview public: citește DOAR din v_neuron_public, v_tree_public, v_bundle_public, v_plans_public. Nu atinge tabelele brute din client. 
+ 
+
+Full content: livrează DOAR prin rpc_get_neuron_full(neuron_id); oricând primești “Access denied” sau “Not authenticated”, răspunde UI‑ul cu un ecran de gating/upsell. 
+
+RLS & Admin: tratează /studio/* separat – editorul operează prin RLS + f_is_admin(). Niciun endpoint public nu expune content_full. 
+
+1) Rute & stări (îngheață arhitectura)
+
+Folosește exact tree‑ul de pagini (route‑map) — e contractul dintre UI și backend. 
+
+Public: /, /search, /pricing, /bundles, /bundles/:slug, /library, /library/:path*, /n/:slug, /legal/*, 404, 403.
+
+Gated: /n/:slug/read (RPC full + watermark), /checkout/*, /account/*.
+
+Admin: /studio/* (neuroni, tree, bundles, plans, pool, analytics, alerts, receipts, settings, guard, users).
+
+Regulă UX: marchează vizual preview vs full pe fiecare card/slug; pentru full, CTA‑ul duce fie la read (dacă ai acces), fie la upsell (plan/bundle/one‑off). 
+
+2) Gating determinist (explică, nu ascunde)
+
+Decizia de acces (OR logic): entitlement ∨ plan='elite' ∨ neuron în tier_access_pool pentru planul userului (inclusiv free=10% dacă activezi regula). Afișează motivul în UI. 
+ 
+ 
+
+Rotire zilnică a pool‑ului: arată “refresh la 03:00 (Europe/Chisinau), valabil 24h” + countdown. (Cron setat în DB.) 
+
+Upsell inteligent: dacă nu ai acces, explică de ce (nu ai entitlement | nu ești elite | neuronul nu e în poolul planului tău azi). Oferă opțiuni: buy single, buy bundle, upgrade plan. (Interogare “de ce” = exemplul SQL din fișiere.) 
+
+3) Livrare FULL (anti‑leak, anti‑scrape)
+
+Doar RPC rpc_get_neuron_full → inseră watermark în conținut, loghează unlock. UI afișează conținutul ca atare, nu îl cache‑ui pe termen lung în browser. 
+
+Rate‑limit: tratează explicit eroarea “Rate limit” din RPC (ex. 60/min). Arată banner 429 + timer retry. (Recomandarea de throttling e în backend‑delta.) 
+
+4) Căutare (accent‑insensitiv, doar preview)
+
+Folosește rpc_search_neurons(q, limit, offset); >=2 caractere, accent‑insensitiv, rank + snippet. Indicativ UI: evidențiază fragmentele. 
+
+Pentru query gol → cele mai noi publicate (fallback definit în RPC). Nu expune content_full în rezultate. 
+
+5) Pricing & ofertă (root=2, cap vizibil)
+
+Pricing page: citește exclusiv din v_plans_public. Arată procentul de acces (10/40/70/100), badge “root=2” pe prețurile non‑free, Free=0€. 
+
+Banner cap: opțional, afișează totalul teoretic al librăriei vs cap 9.974€ când backend raportează depășire (alimentat de alerta zilnică). 
+
+6) Checkout (Stripe, fără fantome)
+
+Creează sesiuni pe server (Edge) cu metadata.uid + {kind: neuron|bundle} + neuron_id|bundle_id. Clientul NU generează direct PaymentIntent. 
+
+Post‑plată: UI redirecționează la /checkout/success; accesul apare instant din triggere (mint entitlements + generate receipts). Dacă webhookurile vin dublu, UI rămâne idempotent. 
+ 
+ 
+
+7) Account (adevărul comercial, nu promisiunea)
+
+Planul meu: UI cere rpc_get_my_active_plan() pentru badge + percent (fallback free). 
+
+Ce dețin: listează din rpc_list_my_entitlements() (sursă unică pentru Owned). Nu confunda “în pool” cu “deținere”. 
+
+Bonuri: afișează purchase_receipts (titlu, slug, version, price) ca snapshot legal, cu dată. 
+
+8) Librărie & Bundles (curat, fără leak)
+
+Sidebar: /library & noduri folosesc v_tree_public (nume + children_count). Nu număra client‑side. 
+
+Bundles: citește din v_bundle_public (items = preview ale neuronilor publicați). Cardul de bundle arată item_count + listă preview. 
+
+9) Media pipeline (imagine vinde, fișier probează)
+
+Preview media (cover/thumb/gallery) — livrează public DOAR dacă neuronul e published=true (RLS pe assets). UI folosește rpc_list_neuron_previews(neuron_id). 
+
+Download (attachment/inline) — doar autentificat, prin rpc_get_neuron_asset_download(asset_id) → primești (bucket,path,mime) și ceri URL semnat server‑side. Respectă rate‑limit + log “download”. 
+
+10) Telemetrie vizibilă (semnal, nu zgomot)
+
+Unlock‑urile se loghează automat din RPC; views/preview/rate le expui cu un mic “emit” RPC dedicat sau la navigare (user_id poate fi NULL). UI nu scrie direct în tabele. 
+ 
+
+Search analytics: nu trimite eveniment dacă query <2 caractere (se aliniază validatorului RPC). 
+
+11) Slug & SEO (canonizează numele)
+
+În Studio, la editare, normalizează slugul cu aceeași regulă ca backend (f_slugify + regex). Arată eroare dacă formatul e invalid; evită dubluri case‑insensitive. 
+
+Mapează slug→label pentru arbore cu f_slug_to_ltree_label (compatibil ltree). UI nu inventează conversii. 
+
+12) Admin /studio (operabil, auditat)
+
+Afișează job audit (cron) pentru: pool daily, cap check, preview‑privileges audit, bundle consistency. Verzi/roșii după ok. 
+ 
+
+Watchdog bundle: tab dedicat cu rândurile din bundle issues (neuron lipsă/nepublicat) + link rapid către bundle edit. 
+
+13) Erori & mesaje (taxonomie UI)
+
+401: “Conectează‑te pentru a continua” (auth).
+
+403: “Acces refuzat” + motiv din §2 + CTA (buy/upgrade). 
+
+404: “Neuronul nu există sau e nepublicat” (nu divulga draft). 
+
+409 la checkout success (dubluri webhook): “Deja procesat” → mergi la Owned. 
+
+429: “Limită de ritm — încearcă din nou” + timer (RPC rate‑limit). 
+
+14) Legal & GDPR (self‑serve, fără să rupi probe)
+
+Export date: oferă în /account/settings buton “Descarcă export JSON” → rpc_export_my_data(). 
+
+Ștergere cont: afișează clar că bonurile de cumpărare rămân ca dovadă legală; doar PII se anonimizează. (Fluxul e asumat de backend.) 
+
+15) Micro‑detalii care evită bătăi de cap
+
+Pool countdown: sincronizează cu cron 03:00 Europe/Chisinau; nu afișa “random daily”. 
+
+Pricing copy: explică root=2 ca disciplină de preț (nu ca “reducere”). 
+
+Studio guard: nu permite DELETE de neuroni cu obligații legale; folosește published=false. Reflectă asta în UI (disable delete, arată motiv). 
+
+Vectori psihologic / social / comercial
+
+Psihologic: arată motivul gating‑ului; nu lăsa creierul să umple golul cu “bug”. 
+
+Social: normalizează rotația zilnică; evită FOMO nefondat; promite determinism (“24h slot”). 
+
+Comercial: livrează dovada la plată (receipts), nu promisiuni; pune one‑off lângă upgrade. 
+ 
+
+16) Checklist implementare (copy exact)
+
+Conectează /search → rpc_search_neurons. 
+
+Conectează /n/:slug → preview din v_neuron_public; CTA Read. 
+
+Conectează /n/:slug/read → rpc_get_neuron_full + watermark; tratează 403/429. 
+ 
+
+Conectează /pricing → v_plans_public. 
+
+Conectează /bundles & /:slug → v_bundle_public. 
+
+Conectează /account header → rpc_get_my_active_plan; /entitlements → rpc_list_my_entitlements; /receipts → purchase_receipts. 
+ 
+
+Creează sesiuni Stripe în server cu metadata corectă. 
+
+În /studio/*, editează slugs cu validatorul din backend și arată audituri cron. 
+ 
+
+Verdict simbolic: Vitrină lucidă. Seif impenetrabil. Ledger verificabil.
+
+
+
+
+
+Reguli FE/UI/UX (ancorate în backend, gata de cod & deploy)
+Operă pe contracte reale (views/RPC/RLS), nu pe presupuneri.
+
+1) Suprafața de date → doar views publice + RPC securizate
+
+Citește preview‑uri exclusiv din v_neuron_public, v_tree_public; livrează FULL strict prin rpc_get_neuron_full(neuron_id) (watermark + logging). Nu face niciun SELECT pe content_full. 
+
+Pentru monetizare/public: consumă v_bundle_public și v_plans_public; tabelele brute bundles/plans rămân revocate la clienți. 
+
+Respectă rutele din arhitectura FE (tree complet) — mapează fiecare pagină la view/RPC-ul corespunzător. 
+
+Impact: ψ: tai anxietatea de „leak” cognitiv; σ: disciplinezi accesul pentru toți actorii; €: blindezi valoarea din conținut.
+
+2) Gating de acces → OR logic + pool 10/40/70/100 + “Free=10% FULL”
+
+Decizia FULL: entitlement sau plan elite sau neuron în tier_access_pool pentru planul utilizatorului (azi). UI‑ul „Read” verifică prin RPC, nu prin client logic. 
+
+Extinde mental modelul UI: și free are 10% FULL zilnic prin pool — afișează „Valabil azi” pe carduri în pool pentru free. 
+
+Poolul se reîmprospătează determinist, zilnic la 03:00 Europe/Chisinau — afișează bannere „setul de azi” și nu memora stale. 
+
+Impact: ψ: creezi tensiune „astăzi sau pierzi”; σ: normalizezi rotația ca regulă de joc; €: convertești FOMO în upgrade.
+
+3) Rute & comportamente (hard‑map)
+
+/n/:slug (Preview): citește din v_neuron_public; arată CTA „Unlock”. 
+
+/n/:slug/read (FULL): cheamă rpc_get_neuron_full; tratează erorile:
+Not authenticated→ redirect /auth/sign-in; Access denied→ panel „De ce?” + butoane (Buy/Subscribe); Neuron not found or unpublished→ /404. 
+
+/pricing, /bundles, /bundles/:slug: trasează UI‑ul pe v_plans_public/v_bundle_public. 
+
+/library/:path*: populează sidebar din v_tree_public; respectă ordinea ierarhică. 
+
+/account/: folosește RPC‑uri helper pentru plan și entitlements (mai jos). 
+
+Impact: ψ: UX fără fricțiuni; σ: coerență la nivel de echipă; €: fiecare pagină devine o secvență monetizabilă.
+
+4) Căutare (accent‑insensitivă, fără leak)
+
+Declanșează doar dacă length(q) ≥ 2, cu debounce 300ms; interoghează rpc_search_neurons(q, limit, offset); afișează rank și snippet returnate; nu expune niciodată content_full. 
+
+Sub capotă: FTS pe coloană tsv GENERATED + unaccent + GIN — optim pentru RO/EN; nu modificați asta din FE. 
+
+Impact: ψ: returnezi rezultate „curate” fără zgomot; σ: standardizezi căutarea; €: crești descoperirea de neuroni cu intenție.
+
+5) Media & fișiere (preview public, download gated)
+
+Preia cover/thumb/galerie prin rpc_list_neuron_previews(neuron_id) — doar dacă neuronul e publicat. 
+
+Download pentru attachment/inline doar via rpc_get_neuron_asset_download(asset_id) → primești (bucket,path,mime) și semnezi URL server‑side; funcția loghează download și aplică gating identic cu FULL. 
+
+Impact: ψ: arăți valoarea fără să o cedezi; σ: stabilești linia dintre teaser și livrare; €: convertești „preview” în tranzacție.
+
+6) Stripe → metadata obligatorie; UI asigură maparea
+
+La Checkout (one‑off): setează în session/intent metadata.uid, metadata.kind ∈ {neuron|bundle}, metadata.neuron_id|bundle_id — idempotency & minting cad corect în backend. 
+
+La Subscribe: folosește prețurile mapate 1–1 la plans.stripe_price_id_month|year; UI selectează tier-ul, backend mapează planul. 
+
+Impact: ψ: elimini dubiile „mi‑a luat banii?”; σ: zero dubluri la webhook; €: timp‑to‑access = timp‑to‑revenue.
+
+7) Receipts & entitlements (probă legală vizibilă)
+
+După plată: afișează în /account/receipts rândurile din purchase_receipts (append‑only: snapshot_title/slug/version/price_cents). 
+
+În /account/entitlements listează neuroni deținuți din RPC helper (sursa: user_entitlements). 
+
+Impact: ψ: închizi bucla de încredere; σ: probe comune pentru suport; €: reduceți refund‑friction.
+
+8) Planul utilizatorului & badge‑uri
+
+Pentru header/account: cheamă rpc_get_my_active_plan(); afișează plan, percent, label; fallback-ul fără subs este free. 
+
+Marchează cardurile din pool cu un chip „Today” și procentul planului. 
+
+Impact: ψ: identitate status; σ: semnal social de apartenență; €: scurtcircuit pentru upgrade.
+
+9) Slug discipline (URL = identitate)
+
+Enforce din UI: ^[a-z0-9]+(-[a-z0-9]+)*$; convertește la lowercase; previno coliziuni vizibile în Studio; backend are triggere + unique CI. 
+
+Impact: ψ: ordine semantică; σ: linkuri rezistente; €: SEO fără accidente.
+
+10) Telemetrie minimă (semnal, nu zgomot)
+
+La read reușit: backend loghează unlock; la download: download. Asigură din FE evenimente view/preview/rate unde are sens (rating clamp 1..5). 
+
+Impact: ψ: măsori comportamente reale; σ: decizii fără poveste; €: hrănești pool‑ul cu date valide.
+
+11) Erori & limits → mapare UX deterministă
+
+Not authenticated→ 401 UI + CTA login; Access denied→ 403 UI + motive (nu în pool, plan insuficient, fără entitlement) + upsell; Rate limit (dacă activezi în BE)→ 429 UI cu „încearcă peste 1 min”; Not found→ 404.
+Impact: ψ: transformi refuzul în claritate; σ: elimină „ghost bugs”; €: crești conversia la upsell.
+
+12) Admin /studio (vizibil doar dacă ești admin)
+
+Afișează /studio/* doar când f_is_admin_current_user() e true; toate operațiile CRUD se bazează pe RLS ce acceptă doar admini. 
+
+În /studio/pool: afișează raportul zilnic (selected vs target); în /studio/alerts: din system_alerts + job_audit (wrappers cron). 
+
+Impact: ψ: control fără frică; σ: garduri care educă operatorul; €: operare fără downtime.
+
+13) Observabilitate & watchdog‑uri în UI
+
+Afișează status pentru: pool refresh, cap 9.974€, bundle consistency (issues>0). Sursa: wrappers cron + job_audit. 
+
+Impact: ψ: vezi timpul; σ: previi regresii; €: eviți vânzări strâmbe.
+
+14) Pricing & cap global (transparență)
+
+/pricing: folosește v_plans_public; păstrează root‑2 la prețuri non‑free; free=0€. 
+
+Opțional banner global dacă v_library_total.total_eur > cap_eur (cap 9.974€). 
+
+Impact: ψ: încredere; σ: reguli vizibile; €: curs de schimb emoțional→plată.
+
+15) GDPR minim în UI
+
+Buton „Exportă datele mele” → rpc_export_my_data() (JSON). Afișează link de download + timestamp. 
+
+Impact: ψ: demnitate a utilizatorului; σ: conformitate; €: protecție juridică.
+
+16) States vizuale standardizate (aplică peste tot)
+
+loading (skeleton ≤600ms), empty (fără fallback copy‑porn), error (cod + acțiune), gated (motiv + acțiune), pool‑today (chip + TTL „până la 03:00”). 
+
+Impact: ψ: userul rămâne în joc; σ: UI fără ramificații haotice; €: fiecare stare are CTA monetizabil.
+
+17) Contracte de integrare (minime, verificabile)
+
+Search: supabase.rpc('rpc_search_neurons',{p_q, p_limit, p_offset}) → listează carduri preview. 
+
+Plan: rpc_get_my_active_plan() → badge în header/account. 
+
+Entitlements: rpc_list_my_entitlements() → /account/entitlements. 
+
+Previews media: rpc_list_neuron_previews(neuron_id); Download: rpc_get_neuron_asset_download(asset_id) + semnătură URL. 
+
+FULL: rpc_get_neuron_full(neuron_id) → injectează watermark în render (nu-l șterge). 
+
+Impact: ψ: predictibilitate; σ: interoperabilitate; €: velocity real, nu promisiuni.
+
+18) Micro‑copy decisiv (nu liric)
+
+„Astăzi ai acces complet la X — se resetează la 03:00.” (pool) 
+
+„Conținutul tău e marcat invizibil pentru siguranță.” (watermark) 
+
+„Plata confirmată — bonul tău e generat și arhivat.” (receipts) 
+
+Verdict: Nu decora interfața — semantizeaz‑o. UI‑ul devine legea vizibilă a bazei de date.

@@ -326,3 +326,585 @@ Fă din căutare o decizie, nu o expresie: tokenizare simplă, accent‑insensit
 
 
 
+8) Asset pipeline pentru neuron — imagini & fișiere, public‑safe + gated
+
+Obiectiv: atașează media la fiecare neuron; expune preview‑uri (cover/galerie) public doar dacă neuronul e published=true; livrează download‑uri (attachment) gated prin aceleași reguli ca content_full (f_has_full_access). Se aliniază cu separarea preview (views) vs full (RPC + RLS) deja stabilită. 
+ 
+
+A) DDL — 29_neuron_assets.sql (idempotent, complet)
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 1) Tabel principal (un asset = un fișier stocat în Storage)
+CREATE TABLE IF NOT EXISTS public.neuron_assets (
+  id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  neuron_id      uuid        NOT NULL REFERENCES public.neurons(id) ON DELETE CASCADE,
+  kind           text        NOT NULL CHECK (kind IN ('cover','gallery','thumb','attachment','inline')),
+  storage_bucket text        NOT NULL DEFAULT 'neurons',          -- bucket privat (Supabase Storage)
+  storage_path   text        NOT NULL,                            -- ex: neurons/<neuron>/<asset>/<file.ext>
+  mime_type      text        NOT NULL,                            -- ex: image/webp, application/pdf
+  file_size      bigint      CHECK (file_size IS NULL OR file_size >= 0),
+
+  -- meta utile (nu blochează pipeline-ul dacă lipsesc)
+  width          int         NULL CHECK (width  IS NULL OR width  > 0),   -- imagini/video
+  height         int         NULL CHECK (height IS NULL OR height > 0),
+  duration_sec   numeric     NULL CHECK (duration_sec IS NULL OR duration_sec >= 0),
+
+  title          text        NULL,
+  alt_text       text        NULL,                                        -- accesibilitate
+  caption        text        NULL,
+  position       int         NOT NULL DEFAULT 0,                          -- ordonare în galerie
+  checksum_sha256 text       NULL,                                        -- ETag integritate (opțional)
+  metadata       jsonb       NOT NULL DEFAULT '{}'::jsonb,                -- extensii viitoare
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- 2) Indici și unicități operaționale
+CREATE INDEX IF NOT EXISTS idx_na_neuron_kind_pos  ON public.neuron_assets(neuron_id, kind, position);
+CREATE INDEX IF NOT EXISTS idx_na_bucket_path      ON public.neuron_assets(storage_bucket, storage_path);
+
+-- Un singur 'cover' / neuron; și un singur 'thumb' / neuron
+CREATE UNIQUE INDEX IF NOT EXISTS ux_na_cover_per_neuron
+  ON public.neuron_assets(neuron_id)
+  WHERE kind = 'cover';
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_na_thumb_per_neuron
+  ON public.neuron_assets(neuron_id)
+  WHERE kind = 'thumb';
+
+-- 3) updated_at
+CREATE OR REPLACE FUNCTION public.trg_assets_touch_updated_at()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.updated_at := now(); RETURN NEW; END $$;
+
+DROP TRIGGER IF EXISTS neuron_assets_touch_updated_at ON public.neuron_assets;
+CREATE TRIGGER neuron_assets_touch_updated_at
+BEFORE UPDATE ON public.neuron_assets
+FOR EACH ROW EXECUTE FUNCTION public.trg_assets_touch_updated_at();
+
+
+Note de modelare: attachment = fișiere pentru download (PDF/ZIP etc.) → gated exact ca content_full cu f_has_full_access. cover/thumb/gallery = preview‑uri sigure pentru public dacă neuronul e publicat; inline = imagini folosite în content_full (livrate doar cu acces). 
+
+B) RLS — read‑only public pe preview doar când neuronul e publicat
+
+Admin are deja „ALL” prin user_roles/f_is_admin() (vezi rolul din §2). End‑userii nu pot scrie; doar citesc preview. Attachments/inline se servesc prin RPC cu verificare de acces. 
+
+-- 1) Activează RLS și curăță privilegii
+ALTER TABLE public.neuron_assets ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.neuron_assets FROM PUBLIC, anon, authenticated;
+
+-- SELECT pentru client (restul operațiilor doar prin service_role/admin)
+GRANT SELECT ON public.neuron_assets TO anon, authenticated;
+
+-- 2) Politici RLS
+-- 2.a) Public preview: doar assets de tip cover/gallery/thumb și doar dacă neuronul e publicat
+DROP POLICY IF EXISTS na_public_preview_anon ON public.neuron_assets;
+CREATE POLICY na_public_preview_anon
+ON public.neuron_assets FOR SELECT
+TO anon
+USING (
+  kind IN ('cover','gallery','thumb')
+  AND EXISTS (SELECT 1 FROM public.neurons n WHERE n.id = neuron_id AND n.published = TRUE)
+);
+
+DROP POLICY IF EXISTS na_public_preview_auth ON public.neuron_assets;
+CREATE POLICY na_public_preview_auth
+ON public.neuron_assets FOR SELECT
+TO authenticated
+USING (
+  kind IN ('cover','gallery','thumb')
+  AND EXISTS (SELECT 1 FROM public.neurons n WHERE n.id = neuron_id AND n.published = TRUE)
+);
+
+-- 2.b) Gated read pentru 'attachment' și 'inline' — DOAR autentificat cu acces FULL la neuron
+DROP POLICY IF EXISTS na_gated_download_auth ON public.neuron_assets;
+CREATE POLICY na_gated_download_auth
+ON public.neuron_assets FOR SELECT
+TO authenticated
+USING (
+  kind IN ('attachment','inline')
+  AND public.f_has_full_access(auth.uid(), neuron_id)   -- §7 OR logic
+);
+
+-- 2.c) Admin full (CRUD)
+DROP POLICY IF EXISTS na_admin_all ON public.neuron_assets;
+CREATE POLICY na_admin_all
+ON public.neuron_assets FOR ALL
+TO authenticated
+USING (public.f_is_admin()) WITH CHECK (public.f_is_admin());
+
+
+f_has_full_access este deja definită (entitlement ∨ elite ∨ pool@plan). Asta asigură că download‑urile și imaginile inline nu scapă public. 
+
+C) RPC — listare publică & download cu throttle + semnare URL
+
+Respectă patternul: preview din view/SELECT; full/gated exclusiv prin RPC, ca și rpc_get_neuron_full. Folosește f_rate_limit pentru anti‑scraping (download). 
+
+-- 1) RPC: listare preview pentru un neuron (folosește RLS; returnează doar tipuri publice)
+CREATE OR REPLACE FUNCTION public.rpc_list_neuron_previews(p_neuron uuid)
+RETURNS TABLE(
+  id uuid, kind text, mime_type text, storage_bucket text, storage_path text,
+  width int, height int, title text, alt_text text, caption text, position int
+)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+  SELECT id, kind, mime_type, storage_bucket, storage_path,
+         width, height, title, alt_text, caption, position
+  FROM public.neuron_assets
+  WHERE neuron_id = p_neuron
+    AND kind IN ('cover','gallery','thumb')
+  ORDER BY kind, position, id
+$$;
+
+REVOKE ALL ON FUNCTION public.rpc_list_neuron_previews(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.rpc_list_neuron_previews(uuid) TO anon, authenticated;
+
+-- 2) RPC: download attachment/inline (gated) → întoarce doar path-ul; semnarea URL se face în Edge/Server
+--    (opțional: adaugă rate limit 30/min pentru "download")
+CREATE OR REPLACE FUNCTION public.rpc_get_neuron_asset_download(p_asset uuid)
+RETURNS TABLE(storage_bucket text, storage_path text, mime_type text)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_neuron uuid;
+  v_kind text;
+  v_allowed boolean;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'Not authenticated';
+  END IF;
+
+  SELECT neuron_id, kind INTO v_neuron, v_kind
+  FROM public.neuron_assets
+  WHERE id = p_asset;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Asset not found';
+  END IF;
+
+  -- doar attachment/inline trec pe aici
+  IF v_kind NOT IN ('attachment','inline') THEN
+    RAISE EXCEPTION 'Not downloadable';
+  END IF;
+
+  -- throttle anti-scraping (30/min/user)
+  IF NOT public.f_rate_limit('uid:'||v_uid::text||':download', 30, '1 minute') THEN
+    RAISE EXCEPTION 'Rate limit';
+  END IF;
+
+  -- gating: aceleași reguli ca pentru content_full
+  v_allowed := public.f_has_full_access(v_uid, v_neuron);
+  IF NOT v_allowed THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+
+  -- (opțional) log telemetrie
+  PERFORM public.f_log_ua(v_uid, v_neuron, 'download', jsonb_build_object('asset',p_asset));
+
+  RETURN QUERY
+  SELECT storage_bucket, storage_path, mime_type
+  FROM public.neuron_assets
+  WHERE id = p_asset;
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.rpc_get_neuron_asset_download(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_get_neuron_asset_download(uuid) TO authenticated;
+
+
+Integrare semnare: păstrează bucketul privat; semnează URL‑ul în Edge/Server (service role) pe baza (bucket, path) returnat de RPC — aceeași filozofie ca livrarea content_full via RPC. 
+
+D) FE contract (succint)
+
+Preview cover/thumb/galerie: supabase.rpc('rpc_list_neuron_previews', { p_neuron }) → afișează imaginea via URL semnată din Storage (sau CDN) — semnarea poate fi făcută client‑side dacă Storage RLS permite read pe obiectele respective doar când neuronul e publicat (alternativ: semnare în Edge). 
+
+Download: click → supabase.rpc('rpc_get_neuron_asset_download', { p_asset }) → server/Edge semnează și răspunde cu URL temporar; UI descarcă.
+
+Rate‑limit: mesaje "Rate limit" mapate la 429 UI (retry‑after 60s), similar cu rpc_get_neuron_full. 
+
+E) Smoke‑tests (SQL)
+-- seed minimal
+INSERT INTO public.neurons(slug,title,summary,content_full,price_cents,category,tags)
+VALUES ('alpha','Alpha','prev','full',2900,'cat','{}') RETURNING id INTO TEMP TABLE t(nid);
+
+-- cover + galerie + attachment
+INSERT INTO public.neuron_assets(neuron_id,kind,storage_path,mime_type,title,position)
+SELECT (SELECT nid FROM t),'cover','neurons/alpha/cover.webp','image/webp','Cover',0;
+
+INSERT INTO public.neuron_assets(neuron_id,kind,storage_path,mime_type,title,position)
+SELECT (SELECT nid FROM t),'gallery','neurons/alpha/g1.webp','image/webp','G1',0;
+
+INSERT INTO public.neuron_assets(neuron_id,kind,storage_path,mime_type,title,position)
+SELECT (SELECT nid FROM t),'attachment','neurons/alpha/whitepaper.pdf','application/pdf','PDF',0;
+
+-- anon: vede doar preview (prin RLS)
+-- SET ROLE anon;  -- (în CI)
+-- SELECT * FROM public.rpc_list_neuron_previews((SELECT nid FROM t));  -- OK
+-- SELECT * FROM public.neuron_assets WHERE kind='attachment';          -- denied by RLS
+
+-- auth fără acces: download aruncă 'Access denied'
+-- SELECT public.rpc_get_neuron_asset_download((SELECT id FROM public.neuron_assets WHERE kind='attachment' LIMIT 1));
+
+-- acordă acces (entitlement) și reîncearcă → OK
+-- INSERT INTO public.user_entitlements(user_id, neuron_id, source)
+-- VALUES (auth.uid(), (SELECT nid FROM t), 'single') ON CONFLICT DO NOTHING;
+-- SELECT public.rpc_get_neuron_asset_download((SELECT id FROM public.neuron_assets WHERE kind='attachment' LIMIT 1));
+
+F) Ancore & aliniere
+
+Gating logic reutilizează f_has_full_access (entitlement ∨ elite ∨ pool@plan). 
+
+Separare preview/full rămâne strictă (views/RPC + RLS), identic cu livrarea content_full. 
+
+Stripe & receipte rămân neschimbate; assets pot fi listate în receipt metadata dacă vrei probă a extraselor livrate, dar nu e necesar acum. 
+
+Verdict simbolic
+
+Fă imaginile să vândă, fișierele să probeze — preview public, download cu drept.
+
+
+
+
+
+9) GDPR minim — Export (self-serve) + Ștergere asistată (anonymize, păstrezi probe)
+
+Țintă executabilă:
+
+Export JSON la cererea userului: subs, purchases, entitlements, analytics_30d. Respectă separarea preview/full & RLS actuale. 
+
+Ștergere asistată: flux „request → worker → anonimizare PII → păstrezi purchase_receipts/user_purchases (obligații legale) → revoci acces (user_entitlements) → cureți analytics”. 
+
+A) RPC — rpc_export_my_data() (JSON, self-serve, 30 zile analytics)
+
+Contract: doar authenticated, doar pentru auth.uid(); livrare JSON agregat. Subs/purchases/entitlements/analytics au deja scheme & indici.
+
+-- 30_gdpr_export.sql
+CREATE OR REPLACE FUNCTION public.rpc_export_my_data()
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid := auth.uid();
+  v_user jsonb;
+  v_subs jsonb;
+  v_purchases jsonb;
+  v_ents jsonb;
+  v_ua jsonb;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'Not authenticated';
+  END IF;
+
+  -- user minimal (PII minimă; mail poate fi anonimizat la ștergere)
+  SELECT to_jsonb(u.*) - 'encrypted_password' - 'email_change'
+    INTO v_user
+  FROM auth.users u
+  WHERE u.id = v_uid;
+
+  -- subs (istoric; 1 activă la un moment dat prin index parțial) :contentReference[oaicite:3]{index=3}
+  SELECT COALESCE(jsonb_agg(
+    jsonb_build_object(
+      'plan', us.plan,
+      'status', us.status,
+      'period_start', us.current_period_start,
+      'period_end', us.current_period_end,
+      'stripe_customer_id', us.stripe_customer_id,
+      'stripe_subscription_id', us.stripe_subscription_id,
+      'created_at', us.created_at
+    ) ORDER BY us.created_at DESC
+  ), '[]'::jsonb)
+  INTO v_subs
+  FROM public.user_subscriptions us
+  WHERE us.user_id = v_uid;
+
+  -- purchases (one-off & bundle, păstrezi idempotency id) :contentReference[oaicite:4]{index=4}
+  SELECT COALESCE(jsonb_agg(
+    jsonb_build_object(
+      'id', up.id,
+      'neuron_id', up.neuron_id,
+      'bundle_id', up.bundle_id,
+      'amount_cents', up.amount_cents,
+      'stripe_payment_intent_id', up.stripe_payment_intent_id,
+      'created_at', up.created_at
+    ) ORDER BY up.created_at DESC
+  ), '[]'::jsonb)
+  INTO v_purchases
+  FROM public.user_purchases up
+  WHERE up.user_id = v_uid;
+
+  -- entitlements (materializate) :contentReference[oaicite:5]{index=5}
+  SELECT COALESCE(jsonb_agg(
+    jsonb_build_object(
+      'neuron_id', ue.neuron_id,
+      'source', ue.source,
+      'granted_at', ue.granted_at
+    ) ORDER BY ue.granted_at DESC
+  ), '[]'::jsonb)
+  INTO v_ents
+  FROM public.user_entitlements ue
+  WHERE ue.user_id = v_uid;
+
+  -- analytics — ultimele 30 de zile (minim necesar) :contentReference[oaicite:6]{index=6}
+  SELECT COALESCE(jsonb_agg(
+    jsonb_build_object(
+      'neuron_id', ua.neuron_id,
+      'action', ua.action,
+      'metadata', ua.metadata,
+      'created_at', ua.created_at
+    ) ORDER BY ua.created_at DESC
+  ), '[]'::jsonb)
+  INTO v_ua
+  FROM public.user_analytics ua
+  WHERE ua.user_id = v_uid
+    AND ua.created_at > now() - interval '30 days';
+
+  RETURN jsonb_build_object(
+    'exported_at', now(),
+    'user', v_user,
+    'subscriptions', v_subs,
+    'purchases', v_purchases,
+    'entitlements', v_ents,
+    'analytics_30d', v_ua
+  );
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.rpc_export_my_data() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_export_my_data() TO authenticated;
+
+B) DDL — account_deletion_requests (queue, status, single‑flight)
+
+Scop: user-ul cere ștergerea; worker-ul anonimizează PII și revocă accesul; păstrezi hash‑ul economic (purchases/receipts). 
+
+-- 31_gdpr_delete.sql
+CREATE TYPE public.deletion_status AS ENUM ('pending','processing','completed','canceled','failed');
+
+CREATE TABLE IF NOT EXISTS public.account_deletion_requests (
+  id            uuid           PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       uuid           NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  mode          text           NOT NULL DEFAULT 'anonymize' CHECK (mode IN ('anonymize')),
+  status        deletion_status NOT NULL DEFAULT 'pending',
+  reason        text,
+  requested_at  timestamptz    NOT NULL DEFAULT now(),
+  processed_at  timestamptz,
+  error         text,
+
+  -- 1 singur „in-flight” per user
+  CONSTRAINT uq_delreq_user_inflight UNIQUE (user_id, status)
+    DEFERRABLE INITIALLY IMMEDIATE
+);
+
+-- indexuri operaționale
+CREATE INDEX IF NOT EXISTS idx_delreq_user     ON public.account_deletion_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_delreq_status   ON public.account_deletion_requests(status);
+CREATE INDEX IF NOT EXISTS idx_delreq_created  ON public.account_deletion_requests(requested_at DESC);
+
+-- RLS
+ALTER TABLE public.account_deletion_requests ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.account_deletion_requests FROM PUBLIC, anon, authenticated;
+
+-- self: poate vedea doar ale sale
+GRANT SELECT, INSERT, UPDATE ON public.account_deletion_requests TO authenticated;
+
+CREATE POLICY delreq_self_select ON public.account_deletion_requests
+FOR SELECT TO authenticated
+USING (user_id = auth.uid());
+
+CREATE POLICY delreq_self_insert ON public.account_deletion_requests
+FOR INSERT TO authenticated
+WITH CHECK (user_id = auth.uid());
+
+-- allow user to cancel his own PENDING request
+CREATE POLICY delreq_self_update_cancel ON public.account_deletion_requests
+FOR UPDATE TO authenticated
+USING (user_id = auth.uid() AND status = 'pending')
+WITH CHECK (user_id = auth.uid());
+
+-- admin full (vezi § roluri admin)
+CREATE POLICY delreq_admin_all ON public.account_deletion_requests
+FOR ALL TO authenticated
+USING (public.f_is_admin()) WITH CHECK (public.f_is_admin());
+
+C) RPC — request/cancel (self) + worker API (admin)
+-- 1) User: inițiază o cerere (idempotent la „pending”)
+CREATE OR REPLACE FUNCTION public.rpc_request_account_deletion(p_reason text DEFAULT NULL)
+RETURNS TABLE(request_id uuid, status deletion_status, requested_at timestamptz)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+
+  -- dacă există deja „pending”, returnează-l
+  RETURN QUERY
+  WITH existing AS (
+    SELECT id, status, requested_at
+    FROM public.account_deletion_requests
+    WHERE user_id = v_uid AND status = 'pending'
+    ORDER BY requested_at DESC LIMIT 1
+  )
+  SELECT id, status, requested_at FROM existing;
+
+  IF NOT FOUND THEN
+    INSERT INTO public.account_deletion_requests(user_id, reason, status)
+    VALUES (v_uid, p_reason, 'pending')
+    RETURNING id, status, requested_at;
+  END IF;
+END $$;
+
+REVOKE ALL ON FUNCTION public.rpc_request_account_deletion(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_request_account_deletion(text) TO authenticated;
+
+-- 2) User: își poate retrage cererea cât timp e 'pending'
+CREATE OR REPLACE FUNCTION public.rpc_cancel_account_deletion()
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE v_uid uuid := auth.uid(); v int;
+BEGIN
+  IF v_uid IS NULL THEN RAISE EXCEPTION 'Not authenticated'; END IF;
+
+  UPDATE public.account_deletion_requests
+     SET status = 'canceled', processed_at = now()
+   WHERE user_id = v_uid AND status = 'pending';
+  GET DIAGNOSTICS v = ROW_COUNT;
+  RETURN v > 0;
+END $$;
+
+REVOKE ALL ON FUNCTION public.rpc_cancel_account_deletion() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.rpc_cancel_account_deletion() TO authenticated;
+
+-- 3) Worker/Admin: procesează o cerere (single-flight + tranzacție)
+CREATE OR REPLACE FUNCTION public.f_process_account_deletion(p_request uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  r record;
+  v_uid uuid;
+  v_active_sub boolean;
+  v_out jsonb := '{}'::jsonb;
+BEGIN
+  -- doar admin
+  IF NOT public.f_is_admin() THEN
+    RAISE EXCEPTION 'Forbidden';
+  END IF;
+
+  SELECT * INTO r FROM public.account_deletion_requests WHERE id = p_request FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Request not found'; END IF;
+  IF r.status NOT IN ('pending','failed') THEN
+    RETURN jsonb_build_object('status', r.status, 'note', 'already handled');
+  END IF;
+
+  -- marchează 'processing'
+  UPDATE public.account_deletion_requests
+     SET status='processing'
+   WHERE id = p_request;
+
+  v_uid := r.user_id;
+
+  -- 0) rate-limit buckets cleanup (anti-scraping noise)
+  PERFORM 1 FROM public.rate_limits WHERE bucket LIKE ('uid:'||v_uid::text||':%');
+  DELETE FROM public.rate_limits WHERE bucket LIKE ('uid:'||v_uid::text||':%');
+
+  -- 1) revocă accesul: șterge entitlements (nu afectează bonurile)
+  DELETE FROM public.user_entitlements WHERE user_id = v_uid;  -- revocare materializată :contentReference[oaicite:8]{index=8}
+
+  -- 2) șterge analytics (tot)
+  DELETE FROM public.user_analytics WHERE user_id = v_uid;      -- privacy-by-default :contentReference[oaicite:9]{index=9}
+
+  -- 3) detectează subs active (Stripe: deconectezi în afara DB) :contentReference[oaicite:10]{index=10}
+  SELECT EXISTS (
+    SELECT 1 FROM public.user_subscriptions
+    WHERE user_id = v_uid AND status = 'active'
+      AND (current_period_end IS NULL OR current_period_end > now())
+  ) INTO v_active_sub;
+
+  v_out := jsonb_build_object('user_id', v_uid::text, 'has_active_subscription', v_active_sub);
+
+  -- 4) anonimizează PII local; păstrezi tranzacțiile/bonurile (obligații legale) :contentReference[oaicite:11]{index=11}
+  BEGIN
+    UPDATE auth.users
+       SET email = ('deleted+'||substr(encode(digest(id::text,'sha256'),'hex'),1,12)||'@anon.invalid'),
+           phone = NULL,
+           raw_user_meta_data = '{}'::jsonb
+     WHERE id = v_uid;
+  EXCEPTION WHEN insufficient_privilege THEN
+    -- dacă nu ai permisiune pe auth.users în SECURITY DEFINER, marchează pentru worker extern
+    v_out := v_out || jsonb_build_object('auth_users_update', 'needs_service_role');
+  END;
+
+  -- IMPORTANT: păstrezi user_purchases & purchase_receipts integral (audit) :contentReference[oaicite:12]{index=12}
+
+  UPDATE public.account_deletion_requests
+     SET status='completed', processed_at=now(), error=NULL
+   WHERE id = p_request;
+
+  RETURN v_out || jsonb_build_object('status','completed','processed_at',now());
+EXCEPTION WHEN OTHERS THEN
+  UPDATE public.account_deletion_requests
+     SET status='failed', processed_at=now(), error=SQLERRM
+   WHERE id = p_request;
+  RAISE;
+END
+$$;
+
+REVOKE ALL ON FUNCTION public.f_process_account_deletion(uuid) FROM PUBLIC, anon, authenticated;
+-- Doar service-role sau admin intern (prin f_is_admin)
+GRANT EXECUTE ON FUNCTION public.f_process_account_deletion(uuid) TO authenticated;
+
+
+Notă de operare: dacă nu poți scrie în auth.users din SQL (Supabase), rulezi worker extern (service key) care: (1) cheamă f_process_account_deletion(); (2) dacă primește auth_users_update = 'needs_service_role', face Admin Auth API updateUser (email→deleted+hash@anon.invalid, meta {}) și finalizează. Receipts/purchases nu se ating. 
+
+D) Smoke‑tests (SQL copy/paste)
+-- 1) Export self
+SELECT public.rpc_export_my_data();  -- JSON cu subs/purchases/entitlements/analytics_30d
+
+-- 2) Creează o cerere de ștergere
+SELECT * FROM public.rpc_request_account_deletion('clean me');
+
+-- 3) Procesează (admin)
+-- SET ROLE authenticated; -- cu user admin în context
+SELECT public.f_process_account_deletion((SELECT id FROM public.account_deletion_requests ORDER BY requested_at DESC LIMIT 1));
+
+-- 4) Verifică efecte:
+--   a) entitlements dispărute
+--   b) analytics dispărute
+--   c) purchases/receipts intacte
+SELECT COUNT(*) FROM public.user_entitlements WHERE user_id = auth.uid();
+SELECT COUNT(*) FROM public.user_analytics WHERE user_id = auth.uid();
+SELECT COUNT(*) FROM public.user_purchases WHERE user_id = auth.uid();
+SELECT COUNT(*) FROM public.purchase_receipts pr
+JOIN public.user_purchases up ON up.id = pr.user_purchase_id
+WHERE up.user_id = auth.uid();
+
+E) Răspunsuri operaționale (clar)
+
+Legal & business: păstrezi user_purchases + purchase_receipts pentru probă, taxe și chargeback; nu mai expun PII — email/phone devin anonime. 
+
+Acces: ștergi user_entitlements ⇒ zero livrări full; preview rămâne public, fără identitate. 
+
+Stripe: dacă has_active_subscription=true, workerul extern cancels at Stripe și marchează în audit; baza rămâne istoric contractual. 
+
+Analytics: curățate complet pentru user (nu doar 30 zile); exportul dă 30 zile by design. 
+
+F) FE contract (succint)
+
+Export: supabase.rpc('rpc_export_my_data') → descarcă JSON; arată banner „GDPR export generated at …”.
+
+Delete: buton „Request deletion” → rpc_request_account_deletion(reason); UI: status live pending/processing/completed/failed. Cancel disponibil doar în pending.
+
+Verdict simbolic
+
+Șterge identitatea, păstrează dovada — anonimizare ca instrument, nu ca scuză.

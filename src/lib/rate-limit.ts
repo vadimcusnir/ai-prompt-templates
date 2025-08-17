@@ -1,133 +1,109 @@
-import { NextRequest } from 'next/server'
+import { createClient } from '@supabase/supabase-js';
 
 interface RateLimitConfig {
-  limit: number
-  windowMs: number
-  blockDuration?: number
+  windowMs: number;
+  max: number;
+  message: string;
+  standardHeaders: boolean;
+  legacyHeaders: boolean;
 }
 
-interface RateLimitEntry {
-  count: number
-  resetTime: number
-  blockedUntil?: number
+interface RateLimitResult {
+  success: boolean;
+  remaining: number;
+  resetTime: number;
+  message?: string;
 }
 
-// Rate limit storage - în production folosiți Redis sau similar
-const rateLimitMap = new Map<string, RateLimitEntry>()
+// In-memory store for development (replace with Redis in production)
+const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
 
-// Cleanup expired entries every 5 minutes
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, entry] of rateLimitMap.entries()) {
-    if (now > entry.resetTime && (!entry.blockedUntil || now > entry.blockedUntil)) {
-      rateLimitMap.delete(key)
-    }
-  }
-}, 5 * 60 * 1000)
-
-export function checkRateLimit(
-  request: NextRequest,
-  config: RateLimitConfig = { limit: 100, windowMs: 15 * 60 * 1000 }
-): { allowed: boolean; remaining: number; resetTime: number; blocked: boolean } {
-  const ip = request.headers.get('x-forwarded-for')?.split(',')[0] || 
-             request.headers.get('x-real-ip') || 
-             'unknown'
+export async function rateLimit(
+  identifier: string,
+  config: RateLimitConfig
+): Promise<RateLimitResult> {
+  const now = Date.now();
+  const windowStart = now - config.windowMs;
   
-  const now = Date.now()
-  const key = `rate_limit:${ip}`
+  // Get current rate limit data
+  const current = rateLimitStore.get(identifier);
   
-  let entry = rateLimitMap.get(key)
-  
-  // Check if IP is blocked
-  if (entry?.blockedUntil && now < entry.blockedUntil) {
-    return {
-      allowed: false,
-      remaining: 0,
-      resetTime: entry.blockedUntil,
-      blocked: true
-    }
-  }
-  
-  // Reset or create new entry
-  if (!entry || now > entry.resetTime) {
-    entry = { count: 0, resetTime: now + config.windowMs }
-    rateLimitMap.set(key, entry)
-  }
-  
-  // Check limit
-  if (entry.count >= config.limit) {
-    // Block IP for 1 hour if limit exceeded
-    const blockDuration = config.blockDuration || 60 * 60 * 1000
-    entry.blockedUntil = now + blockDuration
-    rateLimitMap.set(key, entry)
+  if (!current || current.resetTime < now) {
+    // First request or window expired
+    rateLimitStore.set(identifier, {
+      count: 1,
+      resetTime: now + config.windowMs
+    });
     
     return {
-      allowed: false,
-      remaining: 0,
-      resetTime: entry.blockedUntil,
-      blocked: true
-    }
+      success: true,
+      remaining: config.max - 1,
+      resetTime: now + config.windowMs
+    };
   }
   
-  // Increment counter
-  entry.count++
-  rateLimitMap.set(key, entry)
+  if (current.count >= config.max) {
+    // Rate limit exceeded
+    return {
+      success: false,
+      remaining: 0,
+      resetTime: current.resetTime,
+      message: config.message
+    };
+  }
+  
+  // Increment count
+  current.count++;
+  rateLimitStore.set(identifier, current);
   
   return {
-    allowed: true,
-    remaining: Math.max(0, config.limit - entry.count),
-    resetTime: entry.resetTime,
-    blocked: false
-  }
+    success: true,
+    remaining: config.max - current.count,
+    resetTime: current.resetTime
+  };
 }
 
-// Rate limiting middleware pentru API routes
-export function withRateLimit<T extends unknown[]>(
-  handler: (request: NextRequest, ...args: T) => Promise<Response>,
-  config: RateLimitConfig = { limit: 100, windowMs: 15 * 60 * 1000 }
-) {
-  return async (request: NextRequest, ...args: T) => {
-    const rateLimitResult = checkRateLimit(request, config)
-    
-    if (!rateLimitResult.allowed) {
-      return new Response(
-        JSON.stringify({
-          error: rateLimitResult.blocked 
-            ? 'Too many requests. IP blocked temporarily.' 
-            : 'Rate limit exceeded',
-          retryAfter: Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000)
-        }),
-        {
-          status: 429,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-RateLimit-Limit': config.limit.toString(),
-            'X-RateLimit-Remaining': rateLimitResult.remaining.toString(),
-            'X-RateLimit-Reset': new Date(rateLimitResult.resetTime).toISOString(),
-            'Retry-After': Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000).toString()
-          }
-        }
-      )
+// Cleanup expired entries every hour
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of rateLimitStore.entries()) {
+    if (value.resetTime < now) {
+      rateLimitStore.delete(key);
     }
-    
-    // Add rate limit headers to response
-    const response = await handler(request, ...args)
-    
-    if (response instanceof Response) {
-      response.headers.set('X-RateLimit-Limit', config.limit.toString())
-      response.headers.set('X-RateLimit-Remaining', rateLimitResult.remaining.toString())
-      response.headers.set('X-RateLimit-Reset', new Date(rateLimitResult.resetTime).toISOString())
-    }
-    
-    return response
   }
+}, 60 * 60 * 1000);
+
+// Production Redis implementation
+export async function rateLimitRedis(
+  identifier: string,
+  config: RateLimitConfig
+): Promise<RateLimitResult> {
+  // This would use Redis in production
+  // For now, fallback to in-memory
+  return rateLimit(identifier, config);
 }
 
-// Configurații specifice pentru diferite endpoint-uri
-export const RATE_LIMIT_CONFIGS = {
-  auth: { limit: 5, windowMs: 15 * 60 * 1000, blockDuration: 60 * 60 * 1000 }, // 5 attempts per 15 min
-  prompts: { limit: 100, windowMs: 15 * 60 * 1000 }, // 100 requests per 15 min
-  stripe: { limit: 10, windowMs: 60 * 1000, blockDuration: 30 * 60 * 1000 }, // 10 requests per minute
-  admin: { limit: 50, windowMs: 15 * 60 * 1000 }, // 50 requests per 15 min
-  default: { limit: 100, windowMs: 15 * 60 * 1000 } // Default limit
+// IP-based rate limiting
+export async function rateLimitByIP(
+  ip: string,
+  config: RateLimitConfig
+): Promise<RateLimitResult> {
+  return rateLimit(`ip:${ip}`, config);
+}
+
+// User-based rate limiting
+export async function rateLimitByUser(
+  userId: string,
+  config: RateLimitConfig
+): Promise<RateLimitResult> {
+  return rateLimit(`user:${userId}`, config);
+}
+
+// Endpoint-based rate limiting
+export async function rateLimitByEndpoint(
+  endpoint: string,
+  identifier: string,
+  config: RateLimitConfig
+): Promise<RateLimitResult> {
+  return rateLimit(`${endpoint}:${identifier}`, config);
 }

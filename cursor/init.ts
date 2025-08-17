@@ -1,14 +1,13 @@
 // /cursor/init.ts
 import { execSync } from 'node:child_process';
-import { writeFileSync, existsSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync, existsSync, chmodSync, readdirSync, readFileSync } from 'node:fs';
+import { join, extname } from 'node:path';
 
-// 1) Setup pre-commit hook -> rulează agentul la fiecare commit
 export function installGitHook(root = process.cwd()) {
   const hookPath = join(root, '.git', 'hooks', 'pre-commit');
   const script = `#!/usr/bin/env bash
 # Cursor Law Guard: blocăm commit-ul dacă există încălcări
-npx ts-node -T ./cursor/agent.ts
+npx tsx ./cursor/agent.ts
 STATUS=$?
 if [ $STATUS -ne 0 ]; then
   echo "✖ Commit blocat: încalcă Legile Cursor."
@@ -21,8 +20,15 @@ exit 0
   console.log('✔ pre-commit instalat');
 }
 
-// 2) System Prompt pentru Cursor (agent LLM) – injecție hard a legilor
-export const systemPrompt = `
+function loadDoxCorpus(dir = './dox'): string {
+  const files = readdirSync(dir).filter(f => f.endsWith('.txt'));
+  return files.map(file => {
+    const content = readFileSync(join(dir, file), 'utf8').trim();
+    return `📜 [${file}]\n${content}`;
+  }).join('\n\n');
+}
+
+const systemPromptAppendix = `
 TU EȘTI SUB LEGE. NU AI VOIE SĂ:
 - Faci SELECT direct pe tabele brute pentru pricing/bundles/neuroni; folosește v_plans_public / v_bundle_public, rpc_search_neurons, rpc_get_my_active_plan, rpc_list_my_entitlements.
 - Livrezi content_full altfel decât prin rpc_get_neuron_full verificat de f_has_full_access (fallback no-sub → free; Free = 10% FULL prin tier_access_pool).
@@ -36,13 +42,17 @@ TU EȘTI SUB LEGE. NU AI VOIE SĂ:
 - Amesteci logicile AI-Prompts și 8VULTUS într-o singură aplicație; păstrează separarea de platforme.
 
 Dacă intenția ta contravine acestor reguli, OPREȘTE și propune soluția conformă.
-`;
+`.trim();
 
-// 3) Run once to install hook when imported as CLI
+function writeSystemPromptFile() {
+  const corpus = loadDoxCorpus('./dox');
+  const fullPrompt = `${corpus}\n\n${systemPromptAppendix}`;
+  const outPath = join(process.cwd(), 'cursor', 'SYSTEM_PROMPT.txt');
+  writeFileSync(outPath, fullPrompt, 'utf8');
+  console.log(`✔ SYSTEM_PROMPT scris în ${outPath}`);
+}
+
 if (require.main === module) {
   installGitHook();
-  // Scrie promptul într-un fișier pentru integrarea Cursor
-  const promptPath = join(process.cwd(), 'cursor', 'SYSTEM_PROMPT.txt');
-  writeFileSync(promptPath, systemPrompt.trim(), 'utf8');
-  console.log(`✔ SYSTEM_PROMPT scris în ${promptPath}`);
+  writeSystemPromptFile();
 }

@@ -2,6 +2,14 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
 
+export function enforceLawsFromDox(dir = './dox'): { title: string, content: string }[] {
+  const files = readdirSync(dir).filter(f => f.endsWith('.txt'));
+  return files.map(f => ({
+    title: f,
+    content: readFileSync(join(dir, f), 'utf8').trim()
+  }));
+}
+
 type Violation = {
   law: string;
   file: string;
@@ -193,6 +201,10 @@ function main() {
   } else {
     console.log('✔ Toate Legile sunt respectate.');
   }
+}
+   const laws = enforceLawsFromDox();
+   for (const law of laws) {
+    console.log(`📜 ${law.title}: ${law.content.slice(0, 100)}...`);
 }
 
 if (require.main === module) {

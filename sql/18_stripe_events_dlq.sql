@@ -160,7 +160,7 @@ BEGIN
 
   -- Mapare price.id → plan via plans.stripe_price_id_month|year
   SELECT code INTO v_plan
-  FROM public.plans
+  FROM public.v_plans_public
   WHERE stripe_price_id_month = v_price_id OR stripe_price_id_year = v_price_id
   LIMIT 1;
 
