@@ -1,376 +1,385 @@
 'use client'
 
-import { useEffect, useCallback, useRef } from 'react'
-import { useAnalytics } from './useAnalytics'
+import { useEffect, useRef, useCallback, useState } from 'react'
+import { logger, logPerformance } from '@/lib/analytics'
 
-interface PerformanceMetrics {
-  fcp: number | null
-  lcp: number | null
-  fid: number | null
-  cls: number | null
-  ttfb: number | null
-  pageLoadTime: number | null
-  domContentLoaded: number | null
+export interface PerformanceMetrics {
+  // Core Web Vitals
+  fcp: number | null // First Contentful Paint
+  lcp: number | null // Largest Contentful Paint
+  fid: number | null // First Input Delay
+  cls: number | null // Cumulative Layout Shift
+  ttfb: number | null // Time to First Byte
+  
+  // Custom metrics
+  componentMountTime: number
+  renderTime: number
+  interactionTime: number
+  
+  // Memory usage
+  memoryUsage: {
+    usedJSHeapSize: number
+    totalJSHeapSize: number
+    jsHeapSizeLimit: number
+  } | null
+  
+  // Network metrics
+  networkInfo: {
+    effectiveType: string
+    downlink: number
+    rtt: number
+  } | null
 }
 
-interface ResourceTiming {
-  name: string
-  duration: number
-  size: number
-  type: string
+export interface PerformanceThresholds {
+  fcp: number // 1.8s
+  lcp: number // 2.5s
+  fid: number // 100ms
+  cls: number // 0.1
+  ttfb: number // 800ms
 }
 
-interface PerformanceObserver {
-  observe: (options: any) => void
-  disconnect: () => void
+export interface UsePerformanceMonitorOptions {
+  enabled?: boolean
+  thresholds?: Partial<PerformanceThresholds>
+  reportToAnalytics?: boolean
+  logToConsole?: boolean
+  onThresholdExceeded?: (metric: keyof PerformanceMetrics, value: number, threshold: number) => void
 }
 
-declare global {
-  interface Window {
-    PerformanceObserver: {
-      new (callback: PerformanceObserverCallback): PerformanceObserver
-      supportedEntryTypes: string[]
-    }
-  }
+const DEFAULT_THRESHOLDS: PerformanceThresholds = {
+  fcp: 1800,
+  lcp: 2500,
+  fid: 100,
+  cls: 0.1,
+  ttfb: 800,
 }
 
-export function usePerformanceMonitor() {
-  const { recordPerformanceMetric } = useAnalytics()
-  const metricsRef = useRef<PerformanceMetrics>({
+export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}) {
+  const {
+    enabled = true,
+    thresholds = {},
+    reportToAnalytics = true,
+    logToConsole = false,
+    onThresholdExceeded
+  } = options
+
+  const [metrics, setMetrics] = useState<PerformanceMetrics>({
     fcp: null,
     lcp: null,
     fid: null,
     cls: null,
     ttfb: null,
-    pageLoadTime: null,
-    domContentLoaded: null
+    componentMountTime: 0,
+    renderTime: 0,
+    interactionTime: 0,
+    memoryUsage: null,
+    networkInfo: null,
   })
+
+  const [isMonitoring, setIsMonitoring] = useState(false)
+  const mountStartTime = useRef<number>(Date.now())
+  const renderStartTime = useRef<number>(Date.now())
   const observerRef = useRef<PerformanceObserver | null>(null)
-  const isInitialized = useRef(false)
+  const lcpObserverRef = useRef<PerformanceObserver | null>(null)
+  const clsObserverRef = useRef<PerformanceObserver | null>(null)
 
-  const measureCoreWebVitals = useCallback(() => {
-    if (typeof window === 'undefined' || !('PerformanceObserver' in window)) {
-      return
-    }
+  // Final thresholds with defaults
+  const finalThresholds = { ...DEFAULT_THRESHOLDS, ...thresholds }
 
-    // First Contentful Paint (FCP)
-    try {
-      new PerformanceObserver((entryList) => {
-        const entries = entryList.getEntries()
-        const lastEntry = entries[entries.length - 1] as PerformanceEntry
-        if (lastEntry) {
-          metricsRef.current.fcp = lastEntry.startTime
-          recordPerformanceMetric('fcp', lastEntry.startTime, 'ms')
-        }
-      }).observe({ entryTypes: ['paint'] })
-    } catch (e) {
-      console.warn('FCP measurement failed:', e)
-    }
-
-    // Largest Contentful Paint (LCP)
-    try {
-      new PerformanceObserver((entryList) => {
-        const entries = entryList.getEntries()
-        const lastEntry = entries[entries.length - 1] as PerformanceEntry
-        if (lastEntry) {
-          metricsRef.current.lcp = lastEntry.startTime
-          recordPerformanceMetric('lcp', lastEntry.startTime, 'ms')
-        }
-      }).observe({ entryTypes: ['largest-contentful-paint'] })
-    } catch (e) {
-      console.warn('LCP measurement failed:', e)
-    }
-
-    // First Input Delay (FID)
-    try {
-      new PerformanceObserver((entryList) => {
-        const entries = entryList.getEntries()
-        entries.forEach((entry) => {
-          if (entry.entryType === 'first-input') {
-            const fidEntry = entry as PerformanceEventTiming
-            metricsRef.current.fid = fidEntry.processingStart - fidEntry.startTime
-            recordPerformanceMetric('fid', metricsRef.current.fid, 'ms')
-          }
-        })
-      }).observe({ entryTypes: ['first-input'] })
-    } catch (e) {
-      console.warn('FID measurement failed:', e)
-    }
-
-    // Cumulative Layout Shift (CLS)
-    try {
-      let clsValue = 0
-      let clsEntries: PerformanceEntry[] = []
-      
-      new PerformanceObserver((entryList) => {
-        for (const entry of entryList.getEntries()) {
-          if (!entry.hadRecentInput) {
-            clsValue += (entry as any).value
-            clsEntries.push(entry)
-          }
-        }
-        metricsRef.current.cls = clsValue
-        recordPerformanceMetric('cls', clsValue, 'score')
-      }).observe({ entryTypes: ['layout-shift'] })
-    } catch (e) {
-      console.warn('CLS measurement failed:', e)
-    }
-  }, [recordPerformanceMetric])
-
-  const measureNavigationTiming = useCallback(() => {
-    if (typeof window === 'undefined' || !('performance' in window)) {
-      return
-    }
-
-    const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming
-    if (navigation) {
-      // Time to First Byte
-      const ttfb = navigation.responseStart - navigation.requestStart
-      metricsRef.current.ttfb = ttfb
-      recordPerformanceMetric('ttfb', ttfb, 'ms')
-
-      // Page Load Time
-      const pageLoadTime = navigation.loadEventEnd - navigation.loadEventStart
-      metricsRef.current.pageLoadTime = pageLoadTime
-      recordPerformanceMetric('page_load_time', pageLoadTime, 'ms')
-
-      // DOM Content Loaded
-      const domContentLoaded = navigation.domContentLoadedEventEnd - navigation.domContentLoadedEventStart
-      metricsRef.current.domContentLoaded = domContentLoaded
-      recordPerformanceMetric('dom_content_loaded', domContentLoaded, 'ms')
-
-      // Additional navigation metrics
-      recordPerformanceMetric('dns_lookup', navigation.domainLookupEnd - navigation.domainLookupStart, 'ms')
-      recordPerformanceMetric('tcp_connection', navigation.connectEnd - navigation.connectStart, 'ms')
-      recordPerformanceMetric('server_response', navigation.responseEnd - navigation.responseStart, 'ms')
-      recordPerformanceMetric('dom_parsing', navigation.domComplete - navigation.domInteractive, 'ms')
-    }
-  }, [recordPerformanceMetric])
-
-  const measureResourceTiming = useCallback(() => {
-    if (typeof window === 'undefined' || !('PerformanceObserver' in window)) {
-      return
-    }
-
-    try {
-      new PerformanceObserver((entryList) => {
-        const entries = entryList.getEntries()
-        entries.forEach((entry) => {
-          if (entry.entryType === 'resource') {
-            const resourceEntry = entry as PerformanceResourceTiming
-            const resourceName = resourceEntry.name
-            const resourceType = resourceEntry.initiatorType || 'other'
-            
-            // Measure resource load time
-            const loadTime = resourceEntry.responseEnd - resourceEntry.startTime
-            recordPerformanceMetric(`resource_load_${resourceType}`, loadTime, 'ms')
-            
-            // Measure resource size
-            if (resourceEntry.transferSize > 0) {
-              recordPerformanceMetric(`resource_size_${resourceType}`, resourceEntry.transferSize, 'bytes')
-            }
-            
-            // Track slow resources
-            if (loadTime > 1000) { // Resources taking more than 1 second
-              recordPerformanceMetric('slow_resource', loadTime, 'ms', {
-                name: resourceName,
-                type: resourceType,
-                size: resourceEntry.transferSize
-              })
-            }
-          }
-        })
-      }).observe({ entryTypes: ['resource'] })
-    } catch (e) {
-      console.warn('Resource timing measurement failed:', e)
-    }
-  }, [recordPerformanceMetric])
-
-  const measureLongTasks = useCallback(() => {
-    if (typeof window === 'undefined' || !('PerformanceObserver' in window)) {
-      return
-    }
-
-    try {
-      new PerformanceObserver((entryList) => {
-        const entries = entryList.getEntries()
-        entries.forEach((entry) => {
-          if (entry.entryType === 'longtask') {
-            const longTaskEntry = entry as PerformanceEntry
-            const duration = longTaskEntry.duration
-            
-            recordPerformanceMetric('long_task', duration, 'ms', {
-              startTime: longTaskEntry.startTime,
-              name: longTaskEntry.name || 'unknown'
-            })
-            
-            // Alert for very long tasks
-            if (duration > 100) { // Tasks longer than 100ms
-              recordPerformanceMetric('critical_long_task', duration, 'ms', {
-                startTime: longTaskEntry.startTime,
-                name: longTaskEntry.name || 'unknown'
-              })
-            }
-          }
-        })
-      }).observe({ entryTypes: ['longtask'] })
-    } catch (e) {
-      console.warn('Long task measurement failed:', e)
-    }
-  }, [recordPerformanceMetric])
-
-  const measureMemoryUsage = useCallback(() => {
-    if (typeof window === 'undefined' || !('memory' in performance)) {
-      return
-    }
-
-    const memory = (performance as any).memory
-    if (memory) {
-      recordPerformanceMetric('memory_used', memory.usedJSHeapSize, 'bytes')
-      recordPerformanceMetric('memory_total', memory.totalJSHeapSize, 'bytes')
-      recordPerformanceMetric('memory_limit', memory.jsHeapSizeLimit, 'bytes')
-      
-      // Calculate memory usage percentage
-      const usagePercentage = (memory.usedJSHeapSize / memory.jsHeapSizeLimit) * 100
-      recordPerformanceMetric('memory_usage_percentage', usagePercentage, 'percent')
-      
-      // Alert for high memory usage
-      if (usagePercentage > 80) {
-        recordPerformanceMetric('high_memory_usage', usagePercentage, 'percent')
-      }
-    }
-  }, [recordPerformanceMetric])
-
-  const measureNetworkInfo = useCallback(() => {
-    if (typeof window === 'undefined' || !('navigator' in window)) {
-      return
-    }
-
-    const connection = (navigator as any).connection
-    if (connection) {
-      recordPerformanceMetric('network_effective_type', connection.effectiveType === '4g' ? 4 : 
-        connection.effectiveType === '3g' ? 3 : 
-        connection.effectiveType === '2g' ? 2 : 1, 'score')
-      
-      recordPerformanceMetric('network_downlink', connection.downlink, 'Mbps')
-      recordPerformanceMetric('network_rtt', connection.rtt, 'ms')
-      
-      // Track network changes
-      connection.addEventListener('change', () => {
-        recordPerformanceMetric('network_change', Date.now(), 'timestamp', {
-          effectiveType: connection.effectiveType,
-          downlink: connection.downlink,
-          rtt: connection.rtt
-        })
-      })
-    }
-  }, [recordPerformanceMetric])
-
-  const measureUserInteractions = useCallback(() => {
-    if (typeof window === 'undefined') {
-      return
-    }
-
-    let interactionCount = 0
-    let lastInteractionTime = Date.now()
-
-    const trackInteraction = () => {
-      const now = Date.now()
-      const timeSinceLastInteraction = now - lastInteractionTime
-      
-      interactionCount++
-      lastInteractionTime = now
-      
-      recordPerformanceMetric('user_interaction_interval', timeSinceLastInteraction, 'ms')
-      recordPerformanceMetric('total_interactions', interactionCount, 'count')
-    }
-
-    // Track various user interactions
-    document.addEventListener('click', trackInteraction, { passive: true })
-    document.addEventListener('keydown', trackInteraction, { passive: true })
-    document.addEventListener('scroll', trackInteraction, { passive: true })
-    document.addEventListener('touchstart', trackInteraction, { passive: true })
-  }, [recordPerformanceMetric])
-
-  const getCurrentMetrics = useCallback((): PerformanceMetrics => {
-    return { ...metricsRef.current }
-  }, [])
-
-  const resetMetrics = useCallback(() => {
-    metricsRef.current = {
-      fcp: null,
-      lcp: null,
-      fid: null,
-      cls: null,
-      ttfb: null,
-      pageLoadTime: null,
-      domContentLoaded: null
-    }
-  }, [])
-
-  const generatePerformanceReport = useCallback(() => {
-    const metrics = getCurrentMetrics()
-    const report = {
-      timestamp: Date.now(),
-      url: window.location.href,
-      userAgent: navigator.userAgent,
-      metrics,
-      summary: {
-        fcpScore: metrics.fcp && metrics.fcp < 1800 ? 'good' : metrics.fcp && metrics.fcp < 3000 ? 'needs_improvement' : 'poor',
-        lcpScore: metrics.lcp && metrics.lcp < 2500 ? 'good' : metrics.lcp && metrics.lcp < 4000 ? 'needs_improvement' : 'poor',
-        fidScore: metrics.fid && metrics.fid < 100 ? 'good' : metrics.fid && metrics.fid < 300 ? 'needs_improvement' : 'poor',
-        clsScore: metrics.cls && metrics.cls < 0.1 ? 'good' : metrics.cls && metrics.cls < 0.25 ? 'needs_improvement' : 'poor'
-      }
-    }
-    
-    return report
-  }, [getCurrentMetrics])
-
+  // Measure component mount time
   useEffect(() => {
-    if (isInitialized.current) return
+    if (!enabled) return
 
-    // Wait for page to load before measuring
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        measureCoreWebVitals()
-        measureNavigationTiming()
-        measureResourceTiming()
-        measureLongTasks()
-        measureMemoryUsage()
-        measureNetworkInfo()
-        measureUserInteractions()
-      })
-    } else {
-      measureCoreWebVitals()
-      measureNavigationTiming()
-      measureResourceTiming()
-      measureLongTasks()
-      measureMemoryUsage()
-      measureNetworkInfo()
-      measureUserInteractions()
+    const mountTime = Date.now() - mountStartTime.current
+    setMetrics(prev => ({ ...prev, componentMountTime: mountTime }))
+
+    if (logToConsole) {
+      console.log(`Component mounted in ${mountTime}ms`)
     }
 
-    isInitialized.current = true
+    // Report to analytics if enabled
+    if (reportToAnalytics) {
+      logPerformance('component_mount', { mountTime })
+    }
+  }, [enabled, reportToAnalytics, logToConsole])
+
+  // Measure render time
+  const measureRenderTime = useCallback(() => {
+    const renderTime = Date.now() - renderStartTime.current
+    setMetrics(prev => ({ ...prev, renderTime }))
+
+    if (logToConsole) {
+      console.log(`Component rendered in ${renderTime}ms`)
+    }
+
+    if (reportToAnalytics) {
+      logPerformance('component_render', { renderTime })
+    }
+
+    // Check threshold
+    if (onThresholdExceeded && renderTime > 100) { // 100ms threshold for render
+      onThresholdExceeded('renderTime', renderTime, 100)
+    }
+  }, [reportToAnalytics, logToConsole, onThresholdExceeded])
+
+  // Start performance monitoring
+  const startMonitoring = useCallback(() => {
+    if (!enabled || isMonitoring) return
+
+    setIsMonitoring(true)
+    renderStartTime.current = Date.now()
+
+    try {
+      // Monitor First Contentful Paint
+      if ('PerformanceObserver' in window) {
+        observerRef.current = new PerformanceObserver((list) => {
+          const entries = list.getEntries()
+          entries.forEach((entry) => {
+            if (entry.name === 'first-contentful-paint') {
+              const fcp = entry.startTime
+              setMetrics(prev => ({ ...prev, fcp }))
+
+              if (logToConsole) {
+                console.log(`FCP: ${fcp}ms`)
+              }
+
+              if (reportToAnalytics) {
+                logPerformance('fcp', { fcp })
+              }
+
+              // Check threshold
+              if (fcp > finalThresholds.fcp && onThresholdExceeded) {
+                onThresholdExceeded('fcp', fcp, finalThresholds.fcp)
+              }
+            }
+          })
+        })
+
+        observerRef.current.observe({ entryTypes: ['paint'] })
+      }
+
+      // Monitor Largest Contentful Paint
+      if ('PerformanceObserver' in window) {
+        lcpObserverRef.current = new PerformanceObserver((list) => {
+          const entries = list.getEntries()
+          const lastEntry = entries[entries.length - 1]
+          if (lastEntry) {
+            const lcp = lastEntry.startTime
+            setMetrics(prev => ({ ...prev, lcp }))
+
+            if (logToConsole) {
+              console.log(`LCP: ${lcp}ms`)
+            }
+
+            if (reportToAnalytics) {
+              logPerformance('lcp', { lcp })
+            }
+
+            if (lcp > finalThresholds.lcp && onThresholdExceeded) {
+              onThresholdExceeded('lcp', lcp, finalThresholds.lcp)
+            }
+          }
+        })
+
+        lcpObserverRef.current.observe({ entryTypes: ['largest-contentful-paint'] })
+      }
+
+      // Monitor Cumulative Layout Shift
+      if ('PerformanceObserver' in window) {
+        clsObserverRef.current = new PerformanceObserver((list) => {
+          let clsValue = 0
+          for (const entry of list.getEntries()) {
+            if (!(entry as any).hadRecentInput) {
+              clsValue += (entry as any).value
+            }
+          }
+          
+          setMetrics(prev => ({ ...prev, cls: clsValue }))
+
+          if (logToConsole) {
+            console.log(`CLS: ${clsValue}`)
+          }
+
+          if (reportToAnalytics) {
+            logPerformance('cls', { cls: clsValue })
+          }
+
+          if (clsValue > finalThresholds.cls && onThresholdExceeded) {
+            onThresholdExceeded('cls', clsValue, finalThresholds.cls)
+          }
+        })
+
+        clsObserverRef.current.observe({ entryTypes: ['layout-shift'] })
+      }
+
+      // Monitor First Input Delay
+      if ('PerformanceObserver' in window) {
+        const fidObserver = new PerformanceObserver((list) => {
+          const entries = list.getEntries()
+          entries.forEach((entry) => {
+            const fid = entry.processingStart - entry.startTime
+            setMetrics(prev => ({ ...prev, fid }))
+
+            if (logToConsole) {
+              console.log(`FID: ${fid}ms`)
+            }
+
+            if (reportToAnalytics) {
+              logPerformance('fid', { fid })
+            }
+
+            if (fid > finalThresholds.fid && onThresholdExceeded) {
+              onThresholdExceeded('fid', fid, finalThresholds.fid)
+            }
+          })
+        })
+
+        fidObserver.observe({ entryTypes: ['first-input'] })
+      }
+
+      // Get TTFB from navigation timing
+      if ('performance' in window) {
+        const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming
+        if (navigation) {
+          const ttfb = navigation.responseStart - navigation.requestStart
+          setMetrics(prev => ({ ...prev, ttfb }))
+
+          if (logToConsole) {
+            console.log(`TTFB: ${ttfb}ms`)
+          }
+
+          if (reportToAnalytics) {
+            logPerformance('ttfb', { ttfb })
+          }
+
+          if (ttfb > finalThresholds.ttfb && onThresholdExceeded) {
+            onThresholdExceeded('ttfb', ttfb, finalThresholds.ttfb)
+          }
+        }
+      }
+
+      // Monitor memory usage
+      if ('memory' in performance) {
+        const updateMemoryInfo = () => {
+          const memory = (performance as any).memory
+          setMetrics(prev => ({
+            ...prev,
+            memoryUsage: {
+              usedJSHeapSize: memory.usedJSHeapSize,
+              totalJSHeapSize: memory.totalJSHeapSize,
+              jsHeapSizeLimit: memory.jsHeapSizeLimit,
+            }
+          }))
+        }
+
+        updateMemoryInfo()
+        // Update memory info every 5 seconds
+        const memoryInterval = setInterval(updateMemoryInfo, 5000)
+
+        return () => clearInterval(memoryInterval)
+      }
+
+      // Monitor network information
+      if ('connection' in navigator) {
+        const connection = (navigator as any).connection
+        setMetrics(prev => ({
+          ...prev,
+          networkInfo: {
+            effectiveType: connection.effectiveType,
+            downlink: connection.downlink,
+            rtt: connection.rtt,
+          }
+        }))
+      }
+
+    } catch (error) {
+      logger.error('Failed to start performance monitoring', { error })
+    }
+  }, [enabled, isMonitoring, finalThresholds, reportToAnalytics, logToConsole, onThresholdExceeded])
+
+  // Stop performance monitoring
+  const stopMonitoring = useCallback(() => {
+    if (observerRef.current) {
+      observerRef.current.disconnect()
+      observerRef.current = null
+    }
+    if (lcpObserverRef.current) {
+      lcpObserverRef.current.disconnect()
+      lcpObserverRef.current = null
+    }
+    if (clsObserverRef.current) {
+      clsObserverRef.current.disconnect()
+      clsObserverRef.current = null
+    }
+    setIsMonitoring(false)
+  }, [])
+
+  // Measure interaction time
+  const measureInteraction = useCallback((interactionName: string) => {
+    const interactionTime = Date.now() - renderStartTime.current
+    setMetrics(prev => ({ ...prev, interactionTime }))
+
+    if (logToConsole) {
+      console.log(`${interactionName} interaction took ${interactionTime}ms`)
+    }
+
+    if (reportToAnalytics) {
+      logPerformance('interaction', { interactionName, interactionTime })
+    }
+
+    // Reset render start time for next interaction
+    renderStartTime.current = Date.now()
+  }, [reportToAnalytics, logToConsole])
+
+  // Get performance score
+  const getPerformanceScore = useCallback(() => {
+    let score = 100
+    let issues = 0
+
+    if (metrics.fcp && metrics.fcp > finalThresholds.fcp) {
+      score -= 20
+      issues++
+    }
+    if (metrics.lcp && metrics.lcp > finalThresholds.lcp) {
+      score -= 25
+      issues++
+    }
+    if (metrics.fid && metrics.fid > finalThresholds.fid) {
+      score -= 15
+      issues++
+    }
+    if (metrics.cls && metrics.cls > finalThresholds.cls) {
+      score -= 20
+      issues++
+    }
+    if (metrics.ttfb && metrics.ttfb > finalThresholds.ttfb) {
+      score -= 20
+      issues++
+    }
+
+    return { score: Math.max(0, score), issues }
+  }, [metrics, finalThresholds])
+
+  // Start monitoring on mount
+  useEffect(() => {
+    if (enabled) {
+      startMonitoring()
+    }
 
     return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect()
-      }
+      stopMonitoring()
     }
-  }, [
-    measureCoreWebVitals,
-    measureNavigationTiming,
-    measureResourceTiming,
-    measureLongTasks,
-    measureMemoryUsage,
-    measureNetworkInfo,
-    measureUserInteractions
-  ])
+  }, [enabled, startMonitoring, stopMonitoring])
 
   return {
-    getCurrentMetrics,
-    resetMetrics,
-    generatePerformanceReport,
-    metrics: metricsRef.current
+    metrics,
+    isMonitoring,
+    startMonitoring,
+    stopMonitoring,
+    measureRenderTime,
+    measureInteraction,
+    getPerformanceScore,
+    thresholds: finalThresholds,
   }
 }

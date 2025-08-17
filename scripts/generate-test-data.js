@@ -175,7 +175,7 @@ class TestDataGenerator {
           use_cases: template.use_cases,
           pricing_tier: template.pricing_tier,
           base_price_cents: template.base_price_cents,
-          digital_root: this.calculateDigitalRoot(template.base_price_cents),
+          // digital_root se calculează automat prin GENERATED ALWAYS AS
           published: true
         })
         .select();
@@ -197,7 +197,7 @@ class TestDataGenerator {
         title: 'Reasoning Mastery Bundle',
         slug: 'reasoning-mastery-bundle',
         description: 'Complete framework for advanced reasoning and problem solving',
-        price_cents: 14900,
+        price_cents: 2900, // 29 EUR -> digital root = 2 (respectă regula)
         required_tier: 'architect'
       },
       {
@@ -224,7 +224,7 @@ class TestDataGenerator {
           slug: template.slug,
           description: template.description,
           price_cents: template.price_cents,
-          digital_root: this.calculateDigitalRoot(template.price_cents),
+          // digital_root se calculează automat prin GENERATED ALWAYS AS
           required_tier: template.required_tier
         })
         .select();
@@ -341,12 +341,12 @@ class TestDataGenerator {
       }
     }
 
-    // Test 2: Căutare în tree cu path
+    // Test 2: Căutare în tree cu path (folosesc operatori ltree)
     const treeStartTime = Date.now();
     const { data: treeNodes, error: treeError } = await supabase
       .from('library_tree')
       .select('id, name, path')
-      .like('path', 'ai-fundamentals%')
+      .or('path.eq.ai-fundamentals,path.like.ai-fundamentals.*')
       .order('path');
 
     const treeEndTime = Date.now();

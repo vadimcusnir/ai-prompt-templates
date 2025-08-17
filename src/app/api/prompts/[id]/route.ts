@@ -172,26 +172,30 @@ const rateLimitedDeleteHandler = withRateLimit(async (
     }
 
     // Logging de securitate pentru ștergeri
-    logSecurity('Prompt deletion attempt', { 
+    logSecurity('Prompt soft-deletion attempt (marking as unpublished)', { 
       promptId: id,
       ip: request.headers.get('x-forwarded-for')?.split(',')[0] || request.headers.get('x-real-ip') || 'unknown'
     })
     
+    // Soft-delete: marchează ca nepublicat în loc să ștergi
     const { error } = await supabase
       .from('prompts')
-      .delete()
+      .update({ 
+        published: false,
+        updated_at: new Date().toISOString()
+      })
       .eq('id', id)
 
     if (error) {
-      logError('Prompt deletion failed', { 
+      logError('Prompt soft-deletion failed', { 
         promptId: id, 
         error: error.message 
       })
-      return NextResponse.json({ error: 'Failed to delete prompt' }, { status: 500 })
+      return NextResponse.json({ error: 'Failed to soft-delete prompt' }, { status: 500 })
     }
 
     const duration = Date.now() - startTime
-    logger.performance('DELETE /api/prompts/[id]', duration, { promptId: id })
+    logger.performance('DELETE /api/prompts/[id] (soft-delete)', duration, { promptId: id })
 
     return NextResponse.json({ success: true })
 

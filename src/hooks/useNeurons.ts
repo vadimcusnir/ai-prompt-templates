@@ -274,26 +274,32 @@ export function useNeurons(): UseNeuronsReturn {
     }
     
     try {
+      // Soft-delete: marchează ca nepublicat în loc să ștergi
       const { error } = await supabase
         .from('neurons')
-        .delete()
+        .update({ 
+          published: false,
+          updated_at: new Date().toISOString()
+        })
         .eq('id', id)
         .eq('author_id', user.id) // Ensure user owns the neuron
       
       if (error) throw error
       
-      // Optimistic update
-      setNeurons(prev => prev.filter(n => n.id !== id))
+      // Optimistic update - marchează ca nepublicat local
+      setNeurons(prev => prev.map(n => 
+        n.id === id ? { ...n, published: false } : n
+      ))
       
       // Clear cache to force refresh
       setCache(new Map())
       
-      logger.info('Neuron deleted successfully', { neuronId: id, userId: user.id })
+      logger.info('Neuron soft-deleted successfully (marked as unpublished)', { neuronId: id, userId: user.id })
       
       return { success: true }
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to delete neuron'
-      logError('Error deleting neuron', { error: errorMessage, neuronId: id, userId: user.id })
+      const errorMessage = err instanceof Error ? err.message : 'Failed to soft-delete neuron'
+      logError('Error soft-deleting neuron', { error: errorMessage, neuronId: id, userId: user.id })
       return { success: false, error: errorMessage }
     }
   }, [user, supabase])

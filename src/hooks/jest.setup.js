@@ -102,8 +102,84 @@ const sessionStorageMock = {
 }
 global.sessionStorage = sessionStorageMock
 
-// Mock fetch
+// Mock global functions that might not be available in Jest environment
+if (typeof global.setTimeout === 'undefined') {
+  global.setTimeout = jest.fn((callback, delay) => {
+    const id = Math.random().toString(36).substr(2, 9)
+    return id
+  })
+}
+
+if (typeof global.clearTimeout === 'undefined') {
+  global.clearTimeout = jest.fn((id) => {
+    // Mock implementation
+  })
+}
+
+if (typeof global.setInterval === 'undefined') {
+  global.setInterval = jest.fn((callback, delay) => {
+    const id = Math.random().toString(36).substr(2, 9)
+    return id
+  })
+}
+
+if (typeof global.clearInterval === 'undefined') {
+  global.clearInterval = jest.fn((id) => {
+    // Mock implementation
+  })
+}
+
+// Mock fetch globally
 global.fetch = jest.fn()
+
+// Mock window.location and document
+Object.defineProperty(window, 'location', {
+  value: {
+    pathname: '/test-page',
+    href: 'http://localhost:3000/test-page'
+  },
+  writable: true
+})
+
+Object.defineProperty(document, 'title', {
+  value: 'Test Page',
+  writable: true
+})
+
+Object.defineProperty(document, 'referrer', {
+  value: 'http://localhost:3000/previous-page',
+  writable: true
+})
+
+// Mock performance API
+Object.defineProperty(window, 'performance', {
+  value: {
+    getEntriesByType: jest.fn().mockReturnValue([]),
+    getEntriesByName: jest.fn().mockReturnValue([])
+  },
+  writable: true
+})
+
+// Mock navigator.connection
+Object.defineProperty(navigator, 'connection', {
+  value: {
+    effectiveType: '4g',
+    downlink: 10,
+    rtt: 50,
+    addEventListener: jest.fn()
+  },
+  writable: true
+})
+
+// Mock memory API
+Object.defineProperty(performance, 'memory', {
+  value: {
+    usedJSHeapSize: 1000000,
+    totalJSHeapSize: 2000000,
+    jsHeapSizeLimit: 5000000
+  },
+  writable: true
+})
 
 // Mock console methods to reduce noise in tests
 const originalConsoleError = console.error
@@ -269,7 +345,7 @@ global.testUtils = {
     content: 'This is a test neuron content',
     category: 'test',
     tags: ['test', 'example'],
-    difficulty: 'beginner' as const,
+    difficulty: 'beginner',
     author_id: 'test-author',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -278,7 +354,7 @@ global.testUtils = {
     rating: 0,
     price: 0,
     currency: 'USD',
-    access_level: 'free' as const,
+    access_level: 'free',
     ...overrides,
   }),
   

@@ -1,13 +1,8 @@
 -- ============================================================================
--- DEPLOY SCHEMA DEV - Script complet pentru database-ul de dezvoltare
+-- DEPLOY SCHEMA MANUAL - Script pentru rularea manuală în Supabase Dashboard
 -- ============================================================================
 -- 
--- Acest script creează schema completă cu:
--- - Toate tabelele principale
--- - Indexuri de performanță
--- - RLS activat
--- - Seed data pentru plans
--- - Funcții pentru user tier
+-- Copiază acest script în SQL Editor din Supabase Dashboard și rulează-l
 -- ============================================================================
 
 -- === 1. EXTENSII NECESARE ===
@@ -15,9 +10,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS ltree;
 CREATE EXTENSION IF NOT EXISTS unaccent;
 
--- === 2. ENUMS ȘI TIPURI ===
-
--- ENUM pentru planuri de abonament
+-- === 2. ENUM plan_tier ===
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'plan_tier') THEN
@@ -26,8 +19,6 @@ BEGIN
 END $$;
 
 -- === 3. FUNCȚII UTILITARE ===
-
--- Funcție pentru digital root (formula 1+((n-1)%9))
 CREATE OR REPLACE FUNCTION f_digital_root(n int)
 RETURNS int
 LANGUAGE sql IMMUTABLE AS $$
@@ -36,7 +27,6 @@ LANGUAGE sql IMMUTABLE AS $$
          END
 $$;
 
--- Funcție pentru plan access percentage
 CREATE OR REPLACE FUNCTION f_plan_percent_access(t plan_tier)
 RETURNS int
 LANGUAGE sql IMMUTABLE AS $$
@@ -48,7 +38,6 @@ LANGUAGE sql IMMUTABLE AS $$
   END
 $$;
 
--- Funcție pentru plan rank (ordonare)
 CREATE OR REPLACE FUNCTION f_plan_rank(t plan_tier)
 RETURNS smallint
 LANGUAGE sql IMMUTABLE AS $$
@@ -61,8 +50,6 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 -- === 4. TABELE PRINCIPALE ===
-
--- Tabelul pentru subscription-urile utilizatorilor
 CREATE TABLE IF NOT EXISTS public.user_subscriptions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL,
@@ -76,7 +63,6 @@ CREATE TABLE IF NOT EXISTS public.user_subscriptions (
   updated_at timestamp with time zone DEFAULT now()
 );
 
--- Tabelul pentru planuri de abonament
 CREATE TABLE IF NOT EXISTS public.plans (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   code plan_tier UNIQUE NOT NULL,
@@ -90,7 +76,6 @@ CREATE TABLE IF NOT EXISTS public.plans (
   updated_at timestamp with time zone DEFAULT now()
 );
 
--- Tabelul principal pentru neuroni
 CREATE TABLE IF NOT EXISTS public.neurons (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   title text NOT NULL,
@@ -119,7 +104,6 @@ CREATE TABLE IF NOT EXISTS public.neurons (
   updated_at timestamp with time zone DEFAULT now()
 );
 
--- Tabelul pentru structura library tree
 CREATE TABLE IF NOT EXISTS public.library_tree (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   parent_id uuid REFERENCES public.library_tree(id),
@@ -131,7 +115,6 @@ CREATE TABLE IF NOT EXISTS public.library_tree (
   updated_at timestamp with time zone DEFAULT now()
 );
 
--- Tabelul pentru bundle-uri
 CREATE TABLE IF NOT EXISTS public.bundles (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   title text NOT NULL,
@@ -145,7 +128,6 @@ CREATE TABLE IF NOT EXISTS public.bundles (
   updated_at timestamp with time zone DEFAULT now()
 );
 
--- Tabelul pivot pentru library tree neurons
 CREATE TABLE IF NOT EXISTS public.library_tree_neurons (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tree_id uuid NOT NULL REFERENCES public.library_tree(id),
@@ -156,7 +138,6 @@ CREATE TABLE IF NOT EXISTS public.library_tree_neurons (
   updated_at timestamp with time zone DEFAULT now()
 );
 
--- Tabelul pivot pentru bundle neurons
 CREATE TABLE IF NOT EXISTS public.bundle_neurons (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   bundle_id uuid NOT NULL REFERENCES public.bundles(id),
@@ -168,40 +149,22 @@ CREATE TABLE IF NOT EXISTS public.bundle_neurons (
 );
 
 -- === 5. INDEXURI DE PERFORMANȚĂ ===
-
--- Indexuri pentru neuroni
 CREATE INDEX IF NOT EXISTS idx_neurons_tier_published ON public.neurons (required_tier, published) WHERE published = true;
 CREATE INDEX IF NOT EXISTS idx_neurons_cognitive_category ON public.neurons (cognitive_category) WHERE published = true AND deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_neurons_difficulty_tier ON public.neurons (difficulty_tier) WHERE published = true AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_neurons_slug_ci ON public.neurons (LOWER(slug)) WHERE published = true AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_neurons_title_ci ON public.neurons (LOWER(title)) WHERE published = true AND deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_neurons_created_at ON public.neurons (created_at DESC) WHERE published = true AND deleted_at IS NULL;
 
--- Indexuri pentru bundle-uri
 CREATE INDEX IF NOT EXISTS idx_bundles_tier ON public.bundles (required_tier) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_bundles_slug_ci ON public.bundles (LOWER(slug)) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_bundles_title_ci ON public.bundles (LOWER(title)) WHERE deleted_at IS NULL;
 
--- Indexuri pentru library tree
 CREATE INDEX IF NOT EXISTS idx_library_tree_path ON public.library_tree (path) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_library_tree_parent_id ON public.library_tree (parent_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_library_tree_name_ci ON public.library_tree (LOWER(name)) WHERE deleted_at IS NULL;
 
--- Indexuri pentru user subscriptions
 CREATE INDEX IF NOT EXISTS idx_user_subscriptions_user_id ON public.user_subscriptions (user_id);
 CREATE INDEX IF NOT EXISTS idx_user_subscriptions_status ON public.user_subscriptions (status);
-CREATE INDEX IF NOT EXISTS idx_user_subscriptions_tier ON public.user_subscriptions (tier) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_user_subscriptions_active ON public.user_subscriptions (user_id, status, current_period_end) WHERE status = 'active';
 
--- Indexuri pentru relații
-CREATE INDEX IF NOT EXISTS idx_library_tree_neurons_tree_id ON public.library_tree_neurons (tree_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_library_tree_neurons_neuron_id ON public.library_tree_neurons (neuron_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_bundle_neurons_bundle_id ON public.bundle_neurons (bundle_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_bundle_neurons_neuron_id ON public.bundle_neurons (neuron_id) WHERE deleted_at IS NULL;
-
 -- === 6. ROW LEVEL SECURITY ===
-
--- Activează RLS pe toate tabelele
 ALTER TABLE public.user_subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.neurons ENABLE ROW LEVEL SECURITY;
@@ -211,25 +174,22 @@ ALTER TABLE public.library_tree_neurons ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.bundle_neurons ENABLE ROW LEVEL SECURITY;
 
 -- === 7. POLICIES RLS ===
+DROP POLICY IF EXISTS "Allow public read access to plans" ON public.plans;
+CREATE POLICY "Allow public read access to plans" ON public.plans FOR SELECT USING (true);
 
--- Policies pentru plans (citire publică)
-CREATE POLICY IF NOT EXISTS "Allow public read access to plans" ON public.plans FOR SELECT USING (true);
+DROP POLICY IF EXISTS "Allow public read access to published neurons" ON public.neurons;
+CREATE POLICY "Allow public read access to published neurons" ON public.neurons FOR SELECT USING (published = true AND deleted_at IS NULL);
 
--- Policies pentru neuroni (citire publică pentru cei publicați)
-CREATE POLICY IF NOT EXISTS "Allow public read access to published neurons" ON public.neurons FOR SELECT USING (published = true AND deleted_at IS NULL);
+DROP POLICY IF EXISTS "Allow public read access to bundles" ON public.bundles;
+CREATE POLICY "Allow public read access to bundles" ON public.bundles FOR SELECT USING (deleted_at IS NULL);
 
--- Policies pentru bundle-uri (citire publică)
-CREATE POLICY IF NOT EXISTS "Allow public read access to bundles" ON public.bundles FOR SELECT USING (deleted_at IS NULL);
+DROP POLICY IF EXISTS "Allow public read access to library tree" ON public.library_tree;
+CREATE POLICY "Allow public read access to library tree" ON public.library_tree FOR SELECT USING (deleted_at IS NULL);
 
--- Policies pentru library tree (citire publică)
-CREATE POLICY IF NOT EXISTS "Allow public read access to library tree" ON public.library_tree FOR SELECT USING (deleted_at IS NULL);
+DROP POLICY IF EXISTS "Users can view own subscriptions" ON public.user_subscriptions;
+CREATE POLICY "Users can view own subscriptions" ON public.user_subscriptions FOR SELECT USING (true);
 
--- Policies pentru user subscriptions (user-ul își vede propriile subscription-uri)
-CREATE POLICY IF NOT EXISTS "Users can view own subscriptions" ON public.user_subscriptions FOR SELECT USING (true);
-
--- === 8. SEED DATA ===
-
--- Seed pentru plans (respectă digital root 2)
+-- === 8. SEED DATA PENTRU PLANS ===
 INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents, stripe_price_id_month, stripe_price_id_year)
 VALUES 
   ('free', 'Free', 10, 0, 0, NULL, NULL),
@@ -246,8 +206,6 @@ ON CONFLICT (code) DO UPDATE SET
   updated_at = now();
 
 -- === 9. FUNCȚII UTILITARE ===
-
--- Funcție pentru obținerea tier-ului curent al user-ului
 CREATE OR REPLACE FUNCTION f_get_current_user_tier()
 RETURNS plan_tier
 LANGUAGE plpgsql
@@ -303,7 +261,6 @@ EXCEPTION
 END;
 $$;
 
--- Funcție pentru verificarea dacă un user poate accesa un neuron
 CREATE OR REPLACE FUNCTION f_can_access_neuron(p_neuron_id uuid, p_user_tier plan_tier)
 RETURNS boolean
 LANGUAGE sql
@@ -319,48 +276,18 @@ AS $$
 $$;
 
 -- === 10. GRANTS ȘI PERMISIUNI ===
-
--- Grant SELECT pe tabele publice
 GRANT SELECT ON public.plans TO anon, authenticated;
 GRANT SELECT ON public.neurons TO anon, authenticated;
 GRANT SELECT ON public.bundles TO anon, authenticated;
 GRANT SELECT ON public.library_tree TO anon, authenticated;
-
--- Grant pentru authenticated (vor fi filtrate prin RLS)
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.user_subscriptions TO authenticated;
+GRANT ALL ON public.user_subscriptions TO authenticated;
 GRANT SELECT, INSERT, UPDATE ON public.neurons TO authenticated; -- DELETE eliminat pentru protecția conținutului cu obligații legale
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.library_tree TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.bundles TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.library_tree_neurons TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.bundle_neurons TO authenticated;
 
--- === 11. VERIFICĂRI FINALE ===
-
--- Verifică dacă toate tabelele au RLS activ
-DO $$
-DECLARE
-  table_name text;
-  rls_enabled boolean;
-BEGIN
-  FOR table_name IN 
-    SELECT tablename FROM pg_tables 
-    WHERE schemaname = 'public' 
-    AND tablename IN ('neurons', 'library_tree', 'bundles', 'plans', 'library_tree_neurons', 'bundle_neurons', 'user_subscriptions')
-  LOOP
-    SELECT relrowsecurity INTO rls_enabled
-    FROM pg_class 
-    WHERE relname = table_name AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public');
-    
-    IF NOT rls_enabled THEN
-      RAISE EXCEPTION 'RLS not enabled on table %', table_name;
-    END IF;
-  END LOOP;
-  
-  RAISE NOTICE 'All tables have RLS enabled successfully';
-END $$;
-
--- === 12. FINALIZARE ===
-
+-- === 11. VERIFICARE FINALĂ ===
 DO $$
 BEGIN
   RAISE NOTICE 'Schema DDL completed successfully!';

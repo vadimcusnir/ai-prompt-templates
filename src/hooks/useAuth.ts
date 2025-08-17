@@ -1,207 +1,219 @@
-'use client';
+'use client'
 
-import { useState, useEffect, useContext, createContext } from 'react';
-import { supabase } from '@/lib/supabase/client';
-import { User, Session } from '@supabase/supabase-js';
+import { createContext, useContext, useEffect, useState, useCallback } from 'react'
+import { createClientSideClient } from '@/lib/supabase'
+import { User } from '@supabase/supabase-js'
+import { logger, logSecurity, logError } from '@/lib/logger'
 
-export type UserTier = 'free' | 'architect' | 'initiate' | 'elite';
+type UserTier = 'free' | 'architect' | 'initiate' | 'elite'
 
-interface UserSubscription {
-  id: string;
-  user_id: string;
-  plan_tier: UserTier;
-  status: 'active' | 'canceled' | 'past_due';
-  current_period_start: string;
-  current_period_end: string;
-  stripe_subscription_id: string;
+type AuthContextType = {
+  user: User | null
+  loading: boolean
+  userTier: UserTier
+  signIn: (email: string, password: string) => Promise<{ error?: string }>
+  signUp: (email: string, password: string) => Promise<{ error?: string }>
+  signOut: () => Promise<void>
+  refreshUserTier: () => Promise<void>
 }
 
-interface UserEntitlement {
-  id: string;
-  user_id: string;
-  neuron_id: string;
-  acquired_at: string;
-  expires_at?: string;
-  neuron: {
-    slug: string;
-    title: string;
-    summary: string;
-  };
-}
-
-interface AuthContextType {
-  user: User | null;
-  userTier: UserTier;
-  activePlan: UserSubscription | null;
-  entitlements: UserEntitlement[];
-  loading: boolean;
-  signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, name: string) => Promise<void>;
-  signOut: () => Promise<void>;
-  refreshUserData: () => Promise<void>;
-}
-
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-export function useAuth() {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
-}
+const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [userTier, setUserTier] = useState<UserTier>('free');
-  const [activePlan, setActivePlan] = useState<UserSubscription | null>(null);
-  const [entitlements, setEntitlements] = useState<UserEntitlement[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState<User | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [userTier, setUserTier] = useState<UserTier>('free')
+  
+  const supabase = createClientSideClient()
 
-  // Fetch user data including tier and entitlements
-  const refreshUserData = async () => {
-    if (!user) return;
-    
+  const getUserTier = useCallback(async (userId: string) => {
     try {
-      // Get active plan
-      const { data: plan, error: planError } = await supabase.rpc('get_my_active_plan');
-      if (planError) throw planError;
-      setActivePlan(plan);
+      const { data: subscription, error } = await supabase
+        .from('user_subscriptions')
+        .select('tier, status')
+        .eq('user_id', userId)
+        .eq('status', 'active')
+        .single()
       
-      // Get entitlements
-      const { data: userEntitlements, error: entitlementsError } = await supabase.rpc('list_my_entitlements');
-      if (entitlementsError) throw entitlementsError;
-      setEntitlements(userEntitlements || []);
-      
-      // Determine user tier from plan
-      if (plan) {
-        setUserTier(plan.plan_tier);
+      if (error || !subscription) {
+        // No active subscription, user is free tier
+        logger.info('User has no active subscription, defaulting to free tier', { userId })
+        setUserTier('free')
       } else {
-        setUserTier('free');
+        logger.info('User tier retrieved successfully', { 
+          userId, 
+          tier: subscription.tier 
+        })
+        setUserTier(subscription.tier as UserTier)
       }
     } catch (error) {
-      console.error('Error refreshing user data:', error);
-      // Fallback to free tier on error
-      setUserTier('free');
-      setActivePlan(null);
-      setEntitlements([]);
+      logError('Error getting user tier', { 
+        userId, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      })
+      setUserTier('free')
     }
-  };
+  }, [supabase])
 
-  // Sign in with email and password
-  const signIn = async (email: string, password: string) => {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    if (data.user) {
-      setUser(data.user);
-      await refreshUserData();
-    }
-  };
-
-  // Sign up with email, password and name
-  const signUp = async (email: string, password: string, name: string) => {
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          full_name: name,
-        },
-      },
-    });
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    if (data.user) {
-      setUser(data.user);
-      // Note: user will need to verify email before full access
-    }
-  };
-
-  // Sign out
-  const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    setUser(null);
-    setUserTier('free');
-    setActivePlan(null);
-    setEntitlements([]);
-  };
-
-  // Check if user can access a specific tier
-  const canAccessTier = (requiredTier: UserTier): boolean => {
-    const tierHierarchy = { free: 0, architect: 1, initiate: 2, elite: 3 };
-    return tierHierarchy[userTier] >= tierHierarchy[requiredTier];
-  };
-
-  // Check if user has access to a specific neuron
-  const hasNeuronAccess = (neuronId: string): boolean => {
-    return entitlements.some(entitlement => entitlement.neuron_id === neuronId);
-  };
-
-  // Initialize auth state
   useEffect(() => {
+    // Get initial session
     const getInitialSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (session?.user) {
-        setUser(session.user);
-        await refreshUserData();
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession()
+        
+        if (error) {
+          logError('Error getting session', { error: error.message })
+        } else {
+          setUser(session?.user ?? null)
+          if (session?.user) {
+            await getUserTier(session.user.id)
+          }
+        }
+      } catch (error) {
+        logError('Session error', { error: error instanceof Error ? error.message : 'Unknown error' })
+      } finally {
+        setLoading(false)
       }
-      
-      setLoading(false);
-    };
+    }
 
-    getInitialSession();
+    getInitialSession()
 
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        if (event === 'SIGNED_IN' && session?.user) {
-          setUser(session.user);
-          await refreshUserData();
-        } else if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setUserTier('free');
-          setActivePlan(null);
-          setEntitlements([]);
+        logger.info('Auth state changed', { 
+          event, 
+          userEmail: session?.user?.email ? session.user.email.substring(0, 3) + '***@' + session.user.email.split('@')[1] : 'none'
+        })
+        
+        setUser(session?.user ?? null)
+        
+        if (session?.user) {
+          await getUserTier(session.user.id)
+        } else {
+          setUserTier('free')
         }
+        
+        setLoading(false)
       }
-    );
+    )
 
-    return () => subscription.unsubscribe();
-  }, []);
+    return () => subscription.unsubscribe()
+  }, [getUserTier, supabase.auth])
 
-  const value: AuthContextType = {
+  const signIn = async (email: string, password: string) => {
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      })
+
+      if (error) {
+        logError('Sign in failed', { 
+          email: email.substring(0, 3) + '***@' + email.split('@')[1],
+          error: error.message 
+        })
+        return { error: error.message }
+      }
+
+      logger.info('User signed in successfully', { 
+        userId: data.user?.id,
+        email: email.substring(0, 3) + '***@' + email.split('@')[1]
+      })
+
+      return {}
+    } catch (error) {
+      logError('Unexpected error during sign in', { 
+        email: email.substring(0, 3) + '***@' + email.split('@')[1],
+        error: error instanceof Error ? error.message : 'Unknown error'
+      })
+      return { error: 'An unexpected error occurred' }
+    }
+  }
+
+  const signUp = async (email: string, password: string) => {
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+      })
+
+      if (error) {
+        logError('Sign up failed', { 
+          email: email.substring(0, 3) + '***@' + email.split('@')[1],
+          error: error.message 
+        })
+        return { error: error.message }
+      }
+
+      if (data.user && !data.user.email_confirmed_at) {
+        logger.info('User signup successful, email confirmation required', { 
+          userId: data.user.id,
+          email: email.substring(0, 3) + '***@' + email.split('@')[1]
+        })
+        return { error: 'Please check your email to confirm your account' }
+      }
+
+      logger.info('User signup successful', { 
+        userId: data.user?.id,
+        email: email.substring(0, 3) + '***@' + email.split('@')[1]
+      })
+
+      return {}
+    } catch (error) {
+      logError('Unexpected error during sign up', { 
+        email: email.substring(0, 3) + '***@' + email.split('@')[1],
+        error: error instanceof Error ? error.message : 'Unknown error'
+      })
+      return { error: 'An unexpected error occurred' }
+    }
+  }
+
+  const signOut = async () => {
+    try {
+      const { error } = await supabase.auth.signOut()
+      if (error) {
+        logError('Sign out error', { error: error.message })
+      } else {
+        logger.info('User signed out successfully', { 
+          userId: user?.id,
+          email: user?.email ? user.email.substring(0, 3) + '***@' + user.email.split('@')[1] : 'unknown'
+        })
+      }
+    } catch (error) {
+      logError('Sign out error', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      })
+    }
+  }
+
+  const refreshUserTier = async () => {
+    if (user) {
+      await getUserTier(user.id)
+    }
+  }
+
+  const value = {
     user,
-    userTier,
-    activePlan,
-    entitlements,
     loading,
+    userTier,
     signIn,
     signUp,
     signOut,
-    refreshUserData,
-  };
+    refreshUserTier,
+  }
 
   return (
     <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
-  );
+  )
 }
 
-// Export utility functions
-export { canAccessTier, hasNeuronAccess };
+export const useAuth = () => {
+  const context = useContext(AuthContext)
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider')
+  }
+  return context
+}

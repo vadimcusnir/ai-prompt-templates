@@ -1,508 +1,556 @@
-// Analytics and monitoring system for AI-PROMPT-TEMPLATES
+// Analytics and monitoring system for AI Prompt Templates platform
 
 export interface AnalyticsEvent {
-  event: string;
-  properties: Record<string, any>;
-  timestamp?: number;
-  userId?: string;
-  sessionId?: string;
+  name: string
+  properties?: Record<string, any>
+  timestamp?: number
+  userId?: string
+  sessionId?: string
+  page?: string
+  userAgent?: string
+  referrer?: string
+}
+
+export interface PerformanceMetric {
+  name: string
+  value: number
+  unit: string
+  metadata?: Record<string, any>
+  timestamp?: number
 }
 
 export interface UserBehavior {
-  pageViews: number;
-  neuronsViewed: string[];
-  searchQueries: string[];
-  timeSpent: number;
-  lastActivity: Date;
+  userId: string
+  sessionId: string
+  pageViews: string[]
+  interactions: string[]
+  timeOnPage: number
+  scrollDepth: number
+  clicks: number
 }
 
-// Event types for consistent tracking
-export const EVENT_TYPES = {
-  // Page interactions
-  PAGE_VIEW: 'page_view',
-  PAGE_LOAD: 'page_load',
-  
-  // Search behavior
-  SEARCH_QUERY: 'search_query',
-  SEARCH_RESULT_CLICK: 'search_result_click',
-  
-  // Neuron interactions
-  NEURON_PREVIEW: 'neuron_preview',
-  NEURON_UNLOCK: 'neuron_unlock',
-  NEURON_DOWNLOAD: 'neuron_download',
-  
-  // User actions
-  USER_SIGNUP: 'user_signup',
-  USER_LOGIN: 'user_login',
-  USER_LOGOUT: 'user_logout',
-  
-  // Checkout flow
-  CHECKOUT_STARTED: 'checkout_started',
-  CHECKOUT_COMPLETED: 'checkout_completed',
-  CHECKOUT_ABANDONED: 'checkout_abandoned',
-  
-  // Subscription events
-  SUBSCRIPTION_STARTED: 'subscription_started',
-  SUBSCRIPTION_UPDATED: 'subscription_updated',
-  SUBSCRIPTION_CANCELED: 'subscription_canceled',
-  
-  // Content access
-  CONTENT_ACCESS_GRANTED: 'content_access_granted',
-  CONTENT_ACCESS_DENIED: 'content_access_denied',
-  
-  // Error tracking
-  ERROR_OCCURRED: 'error_occurred',
-  RATE_LIMIT_HIT: 'rate_limit_hit',
-  
-  // Performance metrics
-  PERFORMANCE_METRIC: 'performance_metric',
-  API_RESPONSE_TIME: 'api_response_time',
-} as const;
+export interface ErrorEvent {
+  message: string
+  stack?: string
+  component?: string
+  userId?: string
+  sessionId?: string
+  timestamp?: number
+  metadata?: Record<string, any>
+}
 
-// Analytics service class
-class AnalyticsService {
-  private isInitialized = false;
-  private queue: AnalyticsEvent[] = [];
-  private sessionId: string;
-  private userId?: string;
+// Analytics configuration
+const ANALYTICS_CONFIG = {
+  enabled: process.env.NODE_ENV === 'production',
+  endpoint: process.env.NEXT_PUBLIC_ANALYTICS_ENDPOINT || '/api/analytics',
+  batchSize: 10,
+  flushInterval: 5000, // 5 seconds
+  maxRetries: 3,
+  retryDelay: 1000,
+}
 
-  constructor() {
-    this.sessionId = this.generateSessionId();
-    this.initialize();
+// Event queue for batching
+let eventQueue: AnalyticsEvent[] = []
+let performanceQueue: PerformanceMetric[] = []
+let errorQueue: ErrorEvent[] = []
+let flushTimer: NodeJS.Timeout | null = null
+
+// Session management
+let currentSessionId: string | null = null
+let sessionStartTime: number | null = null
+let pageViewCount = 0
+
+// Performance monitoring
+let performanceObserver: PerformanceObserver | null = null
+let webVitals: Record<string, number> = {}
+
+// Initialize analytics
+export function initializeAnalytics(): void {
+  if (typeof window === 'undefined' || !ANALYTICS_CONFIG.enabled) return
+
+  try {
+    // Generate session ID
+    currentSessionId = generateSessionId()
+    sessionStartTime = Date.now()
+
+    // Start session timer
+    startSessionTimer()
+
+    // Initialize performance monitoring
+    initializePerformanceMonitoring()
+
+    // Set up page visibility tracking
+    setupPageVisibilityTracking()
+
+    // Set up error tracking
+    setupErrorTracking()
+
+    // Set up user behavior tracking
+    setupUserBehaviorTracking()
+
+    // Start flush timer
+    startFlushTimer()
+
+    console.log('Analytics initialized successfully')
+  } catch (error) {
+    console.error('Failed to initialize analytics:', error)
   }
+}
 
-  private generateSessionId(): string {
-    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
+// Session management
+function generateSessionId(): string {
+  return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+}
 
-  private async initialize() {
-    try {
-      // Initialize analytics providers
-      await this.initializeProviders();
-      this.isInitialized = true;
-      
-      // Process queued events
-      this.processQueue();
-    } catch (error) {
-      console.error('Failed to initialize analytics:', error);
+function startSessionTimer(): void {
+  if (typeof window === 'undefined') return
+
+  // Track session duration
+  setInterval(() => {
+    if (sessionStartTime) {
+      const sessionDuration = Date.now() - sessionStartTime
+      trackEvent('session_duration', { duration: sessionDuration })
     }
-  }
+  }, 60000) // Every minute
+}
 
-  private async initializeProviders() {
-    // Initialize Google Analytics 4
-    if (typeof window !== 'undefined' && window.gtag) {
-      window.gtag('config', process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID, {
-        page_title: document.title,
-        page_location: window.location.href,
-      });
-    }
+// Performance monitoring
+function initializePerformanceMonitoring(): void {
+  if (typeof window === 'undefined' || !('PerformanceObserver' in window)) return
 
-    // Initialize other providers as needed
-    // Mixpanel, Amplitude, etc.
-  }
+  try {
+    // Core Web Vitals
+    performanceObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.entryType === 'largest-contentful-paint') {
+          webVitals.lcp = entry.startTime
+          trackPerformance('lcp', entry.startTime, 'ms')
+        } else if (entry.entryType === 'first-input') {
+          const fid = (entry as any).processingStart - entry.startTime
+          webVitals.fid = fid
+          trackPerformance('fid', fid, 'ms')
+        } else if (entry.entryType === 'layout-shift') {
+          if (!webVitals.cls) webVitals.cls = 0
+          webVitals.cls += (entry as any).value
+          trackPerformance('cls', webVitals.cls, 'score')
+        }
+      }
+    })
 
-  private processQueue() {
-    if (!this.isInitialized) return;
+    performanceObserver.observe({ entryTypes: ['largest-contentful-paint', 'first-input', 'layout-shift'] })
 
-    while (this.queue.length > 0) {
-      const event = this.queue.shift();
-      if (event) {
-        this.sendEvent(event);
+    // Navigation timing
+    if ('performance' in window) {
+      const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming
+      if (navigation) {
+        trackPerformance('ttfb', navigation.responseStart - navigation.requestStart, 'ms')
+        trackPerformance('dom_content_loaded', navigation.domContentLoadedEventEnd - navigation.domContentLoadedEventStart, 'ms')
+        trackPerformance('page_load', navigation.loadEventEnd - navigation.loadEventStart, 'ms')
       }
     }
-  }
 
-  private async sendEvent(event: AnalyticsEvent) {
-    if (!this.isInitialized) {
-      this.queue.push(event);
-      return;
-    }
-
-    try {
-      // Send to Google Analytics
-      if (typeof window !== 'undefined' && window.gtag) {
-        window.gtag('event', event.event, {
-          ...event.properties,
-          user_id: this.userId,
-          session_id: this.sessionId,
-          timestamp: event.timestamp || Date.now(),
-        });
+    // Resource timing
+    const resourceObserver = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        const resourceEntry = entry as PerformanceResourceTiming
+        if (resourceEntry.transferSize > 0) {
+          trackPerformance('resource_load', resourceEntry.responseEnd - resourceEntry.startTime, 'ms', {
+            name: resourceEntry.name,
+            type: resourceEntry.initiatorType || 'other',
+            size: resourceEntry.transferSize
+          })
+        }
       }
+    })
 
-      // Send to internal analytics API
-      await this.sendToInternalAPI(event);
+    resourceObserver.observe({ entryTypes: ['resource'] })
 
-      // Send to other providers
-      await this.sendToOtherProviders(event);
+  } catch (error) {
+    console.error('Failed to initialize performance monitoring:', error)
+  }
+}
 
-    } catch (error) {
-      console.error('Failed to send analytics event:', error);
+// Page visibility tracking
+function setupPageVisibilityTracking(): void {
+  if (typeof window === 'undefined') return
+
+  let hiddenTime: number | null = null
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      hiddenTime = Date.now()
+      trackEvent('page_hidden')
+    } else {
+      if (hiddenTime) {
+        const hiddenDuration = Date.now() - hiddenTime
+        trackEvent('page_visible', { hiddenDuration })
+        hiddenTime = null
+      }
+    }
+  })
+}
+
+// Error tracking
+function setupErrorTracking(): void {
+  if (typeof window === 'undefined') return
+
+  // Global error handler
+  window.addEventListener('error', (event) => {
+    trackError('javascript_error', {
+      message: event.message,
+      filename: event.filename,
+      lineno: event.lineno,
+      colno: event.colno,
+      error: event.error?.stack
+    })
+  })
+
+  // Promise rejection handler
+  window.addEventListener('unhandledrejection', (event) => {
+    trackError('unhandled_promise_rejection', {
+      reason: event.reason,
+      promise: event.promise
+    })
+  })
+
+  // React error boundary (if available)
+  if (typeof window !== 'undefined') {
+    (window as any).__REACT_ERROR_BOUNDARY__ = (error: Error, errorInfo: any) => {
+      trackError('react_error_boundary', {
+        message: error.message,
+        stack: error.stack,
+        componentStack: errorInfo.componentStack
+      })
+    }
+  }
+}
+
+// User behavior tracking
+function setupUserBehaviorTracking(): void {
+  if (typeof window === 'undefined') return
+
+  let scrollDepth = 0
+  let clickCount = 0
+  let lastInteraction = Date.now()
+
+  // Scroll tracking
+  let scrollTimeout: NodeJS.Timeout
+  window.addEventListener('scroll', () => {
+    clearTimeout(scrollTimeout)
+    scrollTimeout = setTimeout(() => {
+      const newScrollDepth = Math.round((window.scrollY / (document.documentElement.scrollHeight - window.innerHeight)) * 100)
+      if (newScrollDepth > scrollDepth) {
+        scrollDepth = newScrollDepth
+        trackEvent('scroll_depth', { depth: scrollDepth })
+      }
+    }, 100)
+  })
+
+  // Click tracking
+  document.addEventListener('click', (event) => {
+    clickCount++
+    const target = event.target as HTMLElement
+    trackEvent('click', {
+      target: target.tagName.toLowerCase(),
+      className: target.className,
+      id: target.id,
+      text: target.textContent?.substring(0, 100)
+    })
+  })
+
+  // Interaction tracking
+  const trackInteraction = () => {
+    const now = Date.now()
+    if (now - lastInteraction > 30000) { // 30 seconds
+      trackEvent('user_interaction', {
+        timeSinceLastInteraction: now - lastInteraction,
+        scrollDepth,
+        clickCount
+      })
+      lastInteraction = now
     }
   }
 
-  private async sendToInternalAPI(event: AnalyticsEvent) {
+  document.addEventListener('mousemove', trackInteraction)
+  document.addEventListener('keydown', trackInteraction)
+  document.addEventListener('touchstart', trackInteraction)
+}
+
+// Event tracking
+export function trackEvent(name: string, properties?: Record<string, any>): void {
+  if (!ANALYTICS_CONFIG.enabled) return
+
+  const event: AnalyticsEvent = {
+    name,
+    properties,
+    timestamp: Date.now(),
+    sessionId: currentSessionId,
+    page: typeof window !== 'undefined' ? window.location.pathname : undefined,
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+    referrer: typeof document !== 'undefined' ? document.referrer : undefined,
+  }
+
+  eventQueue.push(event)
+
+  // Flush if queue is full
+  if (eventQueue.length >= ANALYTICS_CONFIG.batchSize) {
+    flushEvents()
+  }
+}
+
+// Performance tracking
+export function trackPerformance(name: string, value: number, unit: string, metadata?: Record<string, any>): void {
+  if (!ANALYTICS_CONFIG.enabled) return
+
+  const metric: PerformanceMetric = {
+    name,
+    value,
+    unit,
+    metadata,
+    timestamp: Date.now(),
+  }
+
+  performanceQueue.push(metric)
+
+  // Flush if queue is full
+  if (performanceQueue.length >= ANALYTICS_CONFIG.batchSize) {
+    flushPerformance()
+  }
+}
+
+// Error tracking
+export function trackError(message: string, metadata?: Record<string, any>): void {
+  if (!ANALYTICS_CONFIG.enabled) return
+
+  const error: ErrorEvent = {
+    message,
+    metadata,
+    timestamp: Date.now(),
+    sessionId: currentSessionId,
+  }
+
+  errorQueue.push(error)
+
+  // Flush errors immediately
+  flushErrors()
+}
+
+// Specific tracking functions
+export function trackPageView(url: string, title?: string): void {
+  pageViewCount++
+  trackEvent('page_view', {
+    url,
+    title,
+    pageViewCount,
+    sessionId: currentSessionId
+  })
+}
+
+export function trackSearch(query: string, filters?: Record<string, any>, resultsCount?: number): void {
+  trackEvent('search', {
+    query,
+    filters,
+    resultsCount,
+    sessionId: currentSessionId
+  })
+}
+
+export function trackNeuronInteraction(neuronId: string, action: string, metadata?: Record<string, any>): void {
+  trackEvent('neuron_interaction', {
+    neuronId,
+    action,
+    metadata,
+    sessionId: currentSessionId
+  })
+}
+
+export function trackCheckout(amount: number, currency: string, plan: string): void {
+  trackEvent('checkout', {
+    amount,
+    currency,
+    plan,
+    sessionId: currentSessionId
+  })
+}
+
+export function trackUserRegistration(method: string): void {
+  trackEvent('user_registration', {
+    method,
+    sessionId: currentSessionId
+  })
+}
+
+export function trackUserLogin(method: string): void {
+  trackEvent('user_login', {
+    method,
+    sessionId: currentSessionId
+  })
+}
+
+// Flush functions
+function startFlushTimer(): void {
+  if (flushTimer) clearInterval(flushTimer)
+  
+  flushTimer = setInterval(() => {
+    flushEvents()
+    flushPerformance()
+  }, ANALYTICS_CONFIG.flushInterval)
+}
+
+async function flushEvents(): Promise<void> {
+  if (eventQueue.length === 0) return
+
+  const events = [...eventQueue]
+  eventQueue = []
+
+  try {
+    await sendAnalyticsData('events', events)
+  } catch (error) {
+    console.error('Failed to flush events:', error)
+    // Re-queue events for retry
+    eventQueue.unshift(...events)
+  }
+}
+
+async function flushPerformance(): Promise<void> {
+  if (performanceQueue.length === 0) return
+
+  const metrics = [...performanceQueue]
+  performanceQueue = []
+
+  try {
+    await sendAnalyticsData('performance', metrics)
+  } catch (error) {
+    console.error('Failed to flush performance data:', error)
+    // Re-queue metrics for retry
+    performanceQueue.unshift(...metrics)
+  }
+}
+
+async function flushErrors(): Promise<void> {
+  if (errorQueue.length === 0) return
+
+  const errors = [...errorQueue]
+  errorQueue = []
+
+  try {
+    await sendAnalyticsData('errors', errors)
+  } catch (error) {
+    console.error('Failed to flush errors:', error)
+    // Re-queue errors for retry
+    errorQueue.unshift(...errors)
+  }
+}
+
+// Send data to analytics endpoint
+async function sendAnalyticsData(type: string, data: any[]): Promise<void> {
+  if (!ANALYTICS_CONFIG.enabled) return
+
+  const payload = {
+    type,
+    data,
+    timestamp: Date.now(),
+    sessionId: currentSessionId,
+  }
+
+  let retries = 0
+  while (retries < ANALYTICS_CONFIG.maxRetries) {
     try {
-      await fetch('/api/analytics', {
+      const response = await fetch(ANALYTICS_CONFIG.endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          ...event,
-          userId: this.userId,
-          sessionId: this.sessionId,
-          timestamp: event.timestamp || Date.now(),
-          userAgent: navigator.userAgent,
-          url: window.location.href,
-          referrer: document.referrer,
-        }),
-      });
-    } catch (error) {
-      console.error('Failed to send to internal API:', error);
-    }
-  }
+        body: JSON.stringify(payload),
+      })
 
-  private async sendToOtherProviders(event: AnalyticsEvent) {
-    // Implement other analytics providers
-    // Mixpanel, Amplitude, etc.
-  }
-
-  // Public methods
-  public setUserId(userId: string) {
-    this.userId = userId;
-    
-    // Update GA user ID
-    if (typeof window !== 'undefined' && window.gtag) {
-      window.gtag('config', process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID, {
-        user_id: userId,
-      });
-    }
-  }
-
-  public trackEvent(eventName: string, properties: Record<string, any> = {}) {
-    const event: AnalyticsEvent = {
-      event: eventName,
-      properties,
-      timestamp: Date.now(),
-      userId: this.userId,
-      sessionId: this.sessionId,
-    };
-
-    this.sendEvent(event);
-  }
-
-  public trackPageView(page: string, properties: Record<string, any> = {}) {
-    this.trackEvent(EVENT_TYPES.PAGE_VIEW, {
-      page,
-      title: document.title,
-      url: window.location.href,
-      referrer: document.referrer,
-      ...properties,
-    });
-  }
-
-  public trackSearch(query: string, resultsCount: number, filters?: Record<string, any>) {
-    this.trackEvent(EVENT_TYPES.SEARCH_QUERY, {
-      query,
-      results_count: resultsCount,
-      filters,
-      page: window.location.pathname,
-    });
-  }
-
-  public trackNeuronInteraction(
-    neuronId: string,
-    neuronSlug: string,
-    action: 'preview' | 'unlock' | 'download',
-    properties: Record<string, any> = {}
-  ) {
-    const eventMap = {
-      preview: EVENT_TYPES.NEURON_PREVIEW,
-      unlock: EVENT_TYPES.NEURON_UNLOCK,
-      download: EVENT_TYPES.NEURON_DOWNLOAD,
-    };
-
-    this.trackEvent(eventMap[action], {
-      neuron_id: neuronId,
-      neuron_slug: neuronSlug,
-      action,
-      ...properties,
-    });
-  }
-
-  public trackCheckout(
-    type: 'neuron' | 'bundle' | 'subscription',
-    itemId: string,
-    amount: number,
-    currency: string = 'EUR',
-    properties: Record<string, any> = {}
-  ) {
-    this.trackEvent(EVENT_TYPES.CHECKOUT_STARTED, {
-      type,
-      item_id: itemId,
-      amount,
-      currency,
-      ...properties,
-    });
-  }
-
-  public trackError(
-    error: Error,
-    context: string,
-    properties: Record<string, any> = {}
-  ) {
-    this.trackEvent(EVENT_TYPES.ERROR_OCCURRED, {
-      error_message: error.message,
-      error_stack: error.stack,
-      context,
-      url: window.location.href,
-      user_agent: navigator.userAgent,
-      ...properties,
-    });
-  }
-
-  public trackPerformance(metric: string, value: number, properties: Record<string, any> = {}) {
-    this.trackEvent(EVENT_TYPES.PERFORMANCE_METRIC, {
-      metric,
-      value,
-      ...properties,
-    });
-  }
-
-  public trackRateLimit(action: string, limit: number, window: number) {
-    this.trackEvent(EVENT_TYPES.RATE_LIMIT_HIT, {
-      action,
-      limit,
-      window,
-      url: window.location.href,
-    });
-  }
-
-  // User behavior tracking
-  public startSessionTimer() {
-    const startTime = Date.now();
-    
-    window.addEventListener('beforeunload', () => {
-      const sessionDuration = Date.now() - startTime;
-      this.trackEvent('session_ended', {
-        duration: sessionDuration,
-        page: window.location.pathname,
-      });
-    });
-  }
-
-  public trackUserEngagement(action: string, properties: Record<string, any> = {}) {
-    this.trackEvent('user_engagement', {
-      action,
-      timestamp: Date.now(),
-      ...properties,
-    });
-  }
-}
-
-// Performance monitoring
-class PerformanceMonitor {
-  private analytics: AnalyticsService;
-
-  constructor(analytics: AnalyticsService) {
-    this.analytics = analytics;
-    this.initialize();
-  }
-
-  private initialize() {
-    if (typeof window === 'undefined') return;
-
-    // Monitor Core Web Vitals
-    this.monitorCoreWebVitals();
-    
-    // Monitor API response times
-    this.monitorAPIResponseTimes();
-    
-    // Monitor resource loading
-    this.monitorResourceLoading();
-  }
-
-  private monitorCoreWebVitals() {
-    // Largest Contentful Paint (LCP)
-    if ('PerformanceObserver' in window) {
-      const lcpObserver = new PerformanceObserver((list) => {
-        const entries = list.getEntries();
-        const lastEntry = entries[entries.length - 1];
-        this.analytics.trackPerformance('lcp', lastEntry.startTime);
-      });
-      lcpObserver.observe({ entryTypes: ['largest-contentful-paint'] });
-
-      // First Input Delay (FID)
-      const fidObserver = new PerformanceObserver((list) => {
-        const entries = list.getEntries();
-        entries.forEach((entry) => {
-          this.analytics.trackPerformance('fid', entry.processingStart - entry.startTime);
-        });
-      });
-      fidObserver.observe({ entryTypes: ['first-input'] });
-
-      // Cumulative Layout Shift (CLS)
-      let clsValue = 0;
-      const clsObserver = new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) {
-          if (!entry.hadRecentInput) {
-            clsValue += (entry as any).value;
-          }
-        }
-        this.analytics.trackPerformance('cls', clsValue);
-      });
-      clsObserver.observe({ entryTypes: ['layout-shift'] });
-    }
-  }
-
-  private monitorAPIResponseTimes() {
-    // Intercept fetch requests to measure response times
-    const originalFetch = window.fetch;
-    window.fetch = async (...args) => {
-      const startTime = performance.now();
-      try {
-        const response = await originalFetch(...args);
-        const endTime = performance.now();
-        const duration = endTime - startTime;
-        
-        this.analytics.trackEvent(EVENT_TYPES.API_RESPONSE_TIME, {
-          url: args[0] as string,
-          method: args[1]?.method || 'GET',
-          duration,
-          status: response.status,
-        });
-        
-        return response;
-      } catch (error) {
-        const endTime = performance.now();
-        const duration = endTime - startTime;
-        
-        this.analytics.trackEvent(EVENT_TYPES.API_RESPONSE_TIME, {
-          url: args[0] as string,
-          method: args[1]?.method || 'GET',
-          duration,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
-        
-        throw error;
+      if (response.ok) {
+        return
       }
-    };
-  }
 
-  private monitorResourceLoading() {
-    if ('PerformanceObserver' in window) {
-      const resourceObserver = new PerformanceObserver((list) => {
-        list.getEntries().forEach((entry) => {
-          if (entry.entryType === 'resource') {
-            const resourceEntry = entry as PerformanceResourceTiming;
-            this.analytics.trackPerformance('resource_load', resourceEntry.duration, {
-              name: resourceEntry.name,
-              type: resourceEntry.initiatorType,
-              size: resourceEntry.transferSize,
-            });
-          }
-        });
-      });
-      resourceObserver.observe({ entryTypes: ['resource'] });
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+    } catch (error) {
+      retries++
+      if (retries >= ANALYTICS_CONFIG.maxRetries) {
+        throw error
+      }
+      
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, ANALYTICS_CONFIG.retryDelay * retries))
     }
   }
 }
 
-// Error monitoring
-class ErrorMonitor {
-  private analytics: AnalyticsService;
-
-  constructor(analytics: AnalyticsService) {
-    this.analytics = analytics;
-    this.initialize();
-  }
-
-  private initialize() {
-    if (typeof window === 'undefined') return;
-
-    // Global error handler
-    window.addEventListener('error', (event) => {
-      this.analytics.trackError(
-        new Error(event.message),
-        'global_error',
-        {
-          filename: event.filename,
-          lineno: event.lineno,
-          colno: event.colno,
-        }
-      );
-    });
-
-    // Unhandled promise rejections
-    window.addEventListener('unhandledrejection', (event) => {
-      this.analytics.trackError(
-        new Error(event.reason),
-        'unhandled_promise_rejection',
-        {
-          reason: event.reason,
-        }
-      );
-    });
-
-    // React error boundary support
-    if (window.ReactErrorBoundary) {
-      window.ReactErrorBoundary.onError = (error: Error, errorInfo: any) => {
-        this.analytics.trackError(error, 'react_error_boundary', {
-          componentStack: errorInfo.componentStack,
-        });
-      };
-    }
+// Utility functions
+export function setUserId(userId: string): void {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem('analytics_user_id', userId)
   }
 }
 
-// Create and export analytics instance
-const analytics = new AnalyticsService();
-const performanceMonitor = new PerformanceMonitor(analytics);
-const errorMonitor = new ErrorMonitor(analytics);
+export function getUserId(): string | null {
+  if (typeof window !== 'undefined') {
+    return window.localStorage.getItem('analytics_user_id')
+  }
+  return null
+}
 
-// Export functions for easy use
-export const trackEvent = (eventName: string, properties: Record<string, any> = {}) => {
-  analytics.trackEvent(eventName, properties);
-};
+export function startSessionTimer(): void {
+  if (typeof window !== 'undefined') {
+    window.sessionStorage.setItem('session_start', Date.now().toString())
+  }
+}
 
-export const trackPageView = (page: string, properties: Record<string, any> = {}) => {
-  analytics.trackPageView(page, properties);
-};
+export function getSessionDuration(): number {
+  if (typeof window !== 'undefined') {
+    const start = window.sessionStorage.getItem('session_start')
+    if (start) {
+      return Date.now() - parseInt(start)
+    }
+  }
+  return 0
+}
 
-export const trackSearch = (query: string, resultsCount: number, filters?: Record<string, any>) => {
-  analytics.trackSearch(query, resultsCount, filters);
-};
+// Cleanup function
+export function cleanupAnalytics(): void {
+  if (flushTimer) {
+    clearInterval(flushTimer)
+    flushTimer = null
+  }
 
-export const trackNeuronInteraction = (
-  neuronId: string,
-  neuronSlug: string,
-  action: 'preview' | 'unlock' | 'download',
-  properties: Record<string, any> = {}
-) => {
-  analytics.trackNeuronInteraction(neuronId, neuronSlug, action, properties);
-};
+  if (performanceObserver) {
+    performanceObserver.disconnect()
+    performanceObserver = null
+  }
 
-export const trackCheckout = (
-  type: 'neuron' | 'bundle' | 'subscription',
-  itemId: string,
-  amount: number,
-  currency: string = 'EUR',
-  properties: Record<string, any> = {}
-) => {
-  analytics.trackCheckout(type, itemId, amount, currency, properties);
-};
+  // Flush remaining data
+  flushEvents()
+  flushPerformance()
+  flushErrors()
+}
 
-export const trackError = (error: Error, context: string, properties: Record<string, any> = {}) => {
-  analytics.trackError(error, context, properties);
-};
+// Export logger for compatibility
+export const logger = {
+  info: (message: string, data?: any) => {
+    console.info(`[Analytics] ${message}`, data)
+    trackEvent('log_info', { message, data })
+  },
+  error: (message: string, data?: any) => {
+    console.error(`[Analytics] ${message}`, data)
+    trackError(message, data)
+  },
+  warn: (message: string, data?: any) => {
+    console.warn(`[Analytics] ${message}`, data)
+    trackEvent('log_warn', { message, data })
+  },
+}
 
-export const setUserId = (userId: string) => {
-  analytics.setUserId(userId);
-};
-
-export const startSessionTimer = () => {
-  analytics.startSessionTimer();
-};
-
-// Export the main analytics instance
-export { analytics as default };
+// Initialize analytics when module is loaded
+if (typeof window !== 'undefined') {
+  // Wait for DOM to be ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeAnalytics)
+  } else {
+    initializeAnalytics()
+  }
+}

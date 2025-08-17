@@ -14,6 +14,8 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
     "test:integration": "jest --config jest.integration.config.js",
+    "test:smoke": "jest --config jest.smoke.config.js",
+    "test:performance": "jest --config jest.performance.config.js",
     "db:migrate": "supabase db push",
     "db:reset": "supabase db reset",
     "db:check": "supabase db diff",
@@ -22,18 +24,24 @@
     "lighthouse": "lhci autorun",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "deploy:dev": "vercel --env development",
+    "deploy:prod": "vercel --prod --env production",
+    "rollback": "vercel rollback",
     "prepare": "husky install"
   },
   "dependencies": {
     "@stripe/stripe-js": "^2.2.0",
     "@supabase/auth-helpers-nextjs": "^0.8.7",
     "@supabase/supabase-js": "^2.55.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.0.0",
     "dotenv": "^17.2.1",
     "lucide-react": "^0.294.0",
     "next": "^14.2.31",
     "react": "^18",
     "react-dom": "^18",
-    "stripe": "^14.7.0"
+    "stripe": "^14.7.0",
+    "tailwind-merge": "^2.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.39.0",

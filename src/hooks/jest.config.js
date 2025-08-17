@@ -34,7 +34,7 @@ const customJestConfig = {
       statements: 80
     }
   },
-  moduleNameMapping: {
+  moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/../../src/$1',
     '^@/hooks/(.*)$': '<rootDir>/$1',
     '^@/contexts/(.*)$': '<rootDir>/../contexts/$1',
@@ -44,50 +44,7 @@ const customJestConfig = {
   testMatch: [
     '<rootDir>/**/__tests__/**/*.{ts,tsx}',
     '<rootDir>/**/*.{test,spec}.{ts,tsx}'
-  ],
-  transform: {
-    '^.+\\.(ts|tsx)$': ['ts-jest', {
-      tsconfig: {
-        jsx: 'react-jsx',
-        target: 'es2020',
-        lib: ['dom', 'dom.iterable', 'es6'],
-        allowJs: true,
-        skipLibCheck: true,
-        strict: true,
-        forceConsistentCasingInFileNames: true,
-        noEmit: true,
-        esModuleInterop: true,
-        module: 'esnext',
-        moduleResolution: 'node',
-        resolveJsonModule: true,
-        isolatedModules: true,
-        jsx: 'preserve',
-        incremental: true,
-        baseUrl: '.',
-        paths: {
-          '@/*': ['../../src/*'],
-          '@/hooks/*': ['./*'],
-          '@/contexts/*': ['../contexts/*'],
-          '@/lib/*': ['../lib/*'],
-          '@/components/*': ['../components/*']
-        }
-      }
-    }]
-  },
-  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
-  globals: {
-    'ts-jest': {
-      tsconfig: {
-        jsx: 'react-jsx'
-      }
-    }
-  },
-  testEnvironmentOptions: {
-    customExportConditions: ['node', 'node-addons']
-  },
-  extensionsToTreatAsEsm: ['.ts', '.tsx'],
-  preset: 'ts-jest/presets/default-esm',
-  resolver: 'ts-jest-resolver'
+  ]
 }
 
 // createJestConfig is exported this way to ensure that next/jest can load the Next.js config which is async

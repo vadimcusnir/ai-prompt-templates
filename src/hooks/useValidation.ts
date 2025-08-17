@@ -514,7 +514,7 @@ export function useFormValidation<T extends Record<string, any>>(
     validation.clearFieldError(field)
   }, [validation])
 
-  const setValues = useCallback((newValues: Partial<T>) => {
+  const setAllValues = useCallback((newValues: Partial<T>) => {
     setValues(prev => ({ ...prev, ...newValues }))
   }, [])
 
@@ -545,7 +545,7 @@ export function useFormValidation<T extends Record<string, any>>(
     ...validation,
     values,
     setFieldValue,
-    setValues,
+    setAllValues,
     handleSubmit,
     resetForm,
     isSubmitting

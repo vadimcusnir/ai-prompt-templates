@@ -491,7 +491,7 @@ REVOKE ALL ON public.bundle_neurons FROM anon, authenticated;
 REVOKE ALL ON public.user_subscriptions FROM anon, authenticated;
 
 -- Grant pentru authenticated (vor fi filtrate prin RLS)
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.neurons TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.neurons TO authenticated; -- DELETE eliminat pentru protecția conținutului cu obligații legale
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.library_tree TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.bundles TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.plans TO authenticated;
