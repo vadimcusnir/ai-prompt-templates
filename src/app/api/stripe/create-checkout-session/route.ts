@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { stripe, TIER_PRICES, getTierName, getTierDescription } from '@/lib/stripe'
+import { stripe } from '@/lib/stripe'
+import { SUBSCRIPTION_PLANS, getPlanConfig } from '@/lib/plans'
 import { createClient } from '@supabase/supabase-js'
 import { withRateLimit, RATE_LIMIT_CONFIGS } from '@/lib/rate-limit'
 import { validateAndSanitize, StripeCheckoutSchema } from '@/lib/validation'
@@ -96,7 +97,7 @@ const rateLimitedHandler = withRateLimit(async (request: NextRequest) => {
     const { tier, userId } = validation.data
     
     // Validare suplimentară pentru tier
-    if (!TIER_PRICES[tier as keyof typeof TIER_PRICES]) {
+    if (!SUBSCRIPTION_PLANS[tier as keyof typeof SUBSCRIPTION_PLANS]) {
       logSecurity('Invalid tier in Stripe request', { tier, userId })
       return NextResponse.json(
         { error: 'Invalid tier' },
@@ -126,22 +127,23 @@ const rateLimitedHandler = withRateLimit(async (request: NextRequest) => {
     })
 
     // Create Stripe checkout session
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [
-        {
-          price_data: {
-            currency: 'eur',
-            product_data: {
-              name: `AI-Prompt-Templates ${getTierName(tier)} Tier`,
-              description: getTierDescription(tier),
-              images: ['https://ai-prompt-templates.com/logo.png'],
+            const planConfig = getPlanConfig(tier as keyof typeof SUBSCRIPTION_PLANS)
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ['card'],
+          line_items: [
+            {
+              price_data: {
+                currency: 'eur',
+                product_data: {
+                  name: `AI-Prompt-Templates ${planConfig.name} Tier`,
+                  description: planConfig.description,
+                  images: ['https://ai-prompt-templates.com/logo.png'],
+                },
+                unit_amount: planConfig.monthlyPrice,
+              },
+              quantity: 1,
             },
-            unit_amount: TIER_PRICES[tier as keyof typeof TIER_PRICES],
-          },
-          quantity: 1,
-        },
-      ],
+          ],
       mode: 'payment',
       success_url: `${process.env.NEXT_PUBLIC_SITE_URL}/dashboard?success=true&tier=${tier}`,
       cancel_url: `${process.env.NEXT_PUBLIC_SITE_URL}/pricing?canceled=true`,

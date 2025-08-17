@@ -104,13 +104,13 @@ export default function LibraryPage() {
   }
 
   const getAccessLevel = (prompt: Prompt) => {
-    const tierOrder = ['explorer', 'architect', 'initiate', 'master']
+    const tierOrder = ['free', 'architect', 'initiate', 'elite']
     const userTierIndex = tierOrder.indexOf(userTier)
     
-    if (userTier === 'explorer') return 0.2
+    if (userTier === 'free') return 0.1
     if (userTier === 'architect') return 0.4
     if (userTier === 'initiate') return 0.7
-    if (userTier === 'master') return 1.0
+    if (userTier === 'elite') return 1.0
     
     return 0.2
   }

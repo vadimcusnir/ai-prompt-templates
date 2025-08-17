@@ -243,7 +243,8 @@ export const useSecurity = (config?: Partial<SecurityConfig>) => {
           severity: 'high',
           details: 'Invalid or missing CSRF token',
           ip: 'unknown',
-          userAgent: navigator.userAgent
+          userAgent: navigator.userAgent,
+          timestamp: new Date().toISOString()
         })
       }
     }
@@ -256,7 +257,8 @@ export const useSecurity = (config?: Partial<SecurityConfig>) => {
         severity: 'medium',
         details: 'Rate limit exceeded',
         ip: 'unknown',
-        userAgent: navigator.userAgent
+        userAgent: navigator.userAgent,
+        timestamp: new Date().toISOString()
       })
     }
 
@@ -267,7 +269,8 @@ export const useSecurity = (config?: Partial<SecurityConfig>) => {
         severity: 'medium',
         details: 'Request body too large',
         ip: 'unknown',
-        userAgent: navigator.userAgent
+        userAgent: navigator.userAgent,
+        timestamp: new Date().toISOString()
       })
     }
 

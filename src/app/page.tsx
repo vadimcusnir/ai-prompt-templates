@@ -25,7 +25,7 @@ export default function HomePage() {
   
   const fetchPrompts = async () => {
     try {
-      const response = await fetch('/api/prompts?tier=explorer');
+      const response = await fetch('/api/prompts?tier=free');
       const data = await response.json();
       setPrompts(data.prompts || []);
     } catch (error) {

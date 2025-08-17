@@ -1,0 +1,841 @@
+
+
+
+
+
+DB_SPEC — “Creier pe neuroni” (variabile, valori, relații)
+
+Stack țintă: PostgreSQL (Supabase), RLS activ, Stripe ca procesator. Gating 10/40/70/100 pe planuri Free/Architect/Initiate/Elite; prețuri cu digital root = 2; librărie publică cu preview; entitlements materiale pentru acces
+
+
+
+
+ENUMS & CONST — fixe, verificabile, aplicabile imediat
+1) ENUM: plan_tier (PostgreSQL)
+-- 00_enums.sql
+CREATE TYPE plan_tier AS ENUM ('free','architect','initiate','elite');
+
+1.1 Mapări funcționale (acces, ordonare, denumire afișată)
+-- acces procentual (10/40/70/100)
+CREATE OR REPLACE FUNCTION f_plan_percent_access(t plan_tier)
+RETURNS int LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE t
+    WHEN 'free'      THEN 10
+    WHEN 'architect' THEN 40
+    WHEN 'initiate'  THEN 70
+    WHEN 'elite'     THEN 100
+  END
+$$;
+
+-- ordonare (pentru sortare crescătoare de plan)
+CREATE OR REPLACE FUNCTION f_plan_rank(t plan_tier)
+RETURNS smallint LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE t
+    WHEN 'free'      THEN 0
+    WHEN 'architect' THEN 1
+    WHEN 'initiate'  THEN 2
+    WHEN 'elite'     THEN 3
+  END
+$$;
+
+-- denumire afișată (UI labels)
+CREATE OR REPLACE FUNCTION f_plan_display_name(t plan_tier)
+RETURNS text LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE t
+    WHEN 'free'      THEN 'Free'
+    WHEN 'architect' THEN 'Arhitect'
+    WHEN 'initiate'  THEN 'Inițiat'
+    WHEN 'elite'     THEN 'Elite'
+  END
+$$;
+
+1.2 Tipuri auxiliare (opțional, dar utile în UI/API)
+-- stabil: perechi (plan, procent) pentru seed/expunere
+CREATE VIEW v_plan_tier_map AS
+SELECT unnest(enum_range(NULL::plan_tier)) AS plan,
+       f_plan_percent_access(unnest(enum_range(NULL::plan_tier))) AS percent_access,
+       f_plan_rank(unnest(enum_range(NULL::plan_tier))) AS rank,
+       f_plan_display_name(unnest(enum_range(NULL::plan_tier))) AS label;
+
+2) CONST: digital_root_required = 2 (prețuri root-2, nivel bază)
+2.1 Funcții numerice (rapide, deterministe)
+-- digital root pentru număr întreg pozitiv (formula 1+((n-1)%9))
+CREATE OR REPLACE FUNCTION f_digital_root(n int)
+RETURNS int LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE WHEN n IS NULL OR n <= 0 THEN NULL
+              ELSE 1 + ((n - 1) % 9)
+         END
+$$;
+
+-- verifcă root=2 pentru preț exprimat în cenți (calculează pe valoarea în EUR)
+CREATE OR REPLACE FUNCTION f_is_root2_eur_cents(cents int)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+  SELECT f_digital_root(cents / 100) = 2
+$$;
+
+2.2 DOMAIN (impune root=2 la nivel de coloană)
+-- orice coloană definită cu acest domeniu respectă root=2 pe EUR
+CREATE DOMAIN eur_cents_root2 AS integer
+  CHECK (VALUE > 0 AND f_is_root2_eur_cents(VALUE));
+
+-- exemplu de aplicare (neuroni + bundle)
+-- ALTER TABLE neurons ALTER COLUMN price_cents TYPE eur_cents_root2;
+-- ALTER TABLE bundles ALTER COLUMN price_cents TYPE eur_cents_root2;
+
+2.3 Coloană calculată (audit vizibil) + trigger fallback
+-- model GÉNERATED (audit): stochează root calculat din cenți→EUR
+-- (Postgres 12+ suportă generated columns)
+-- exemplu într-un tabel cu preț:
+-- ALTER TABLE neurons
+--   ADD COLUMN digital_root smallint
+--   GENERATED ALWAYS AS (f_digital_root(price_cents / 100)) STORED,
+--   ADD CONSTRAINT ck_neurons_root2 CHECK (digital_root = 2);
+
+-- alternativ, acolo unde nu poți folosi DOMAIN/GENERATED:
+CREATE OR REPLACE FUNCTION trg_enforce_root2()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NOT f_is_root2_eur_cents(NEW.price_cents) THEN
+    RAISE EXCEPTION 'Price % cents (=%€) does not satisfy digital root = 2',
+      NEW.price_cents, (NEW.price_cents/100.0);
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- exemplu de atașare:
+-- CREATE TRIGGER neurons_root2
+--   BEFORE INSERT OR UPDATE ON neurons
+--   FOR EACH ROW EXECUTE FUNCTION trg_enforce_root2();
+
+-- CREATE TRIGGER bundles_root2
+--   BEFORE INSERT OR UPDATE ON bundles
+--   FOR EACH ROW EXECUTE FUNCTION trg_enforce_root2();
+
+2.4 Teste minimale (rulează în SQL)
+-- trebuie TRUE
+SELECT f_digital_root(29)=2    AS dr_29_ok,
+       f_digital_root(74)=2    AS dr_74_ok,
+       f_digital_root(299)=2   AS dr_299_ok;
+
+-- cenți pentru 29€, 74€, 299€  → TRUE
+SELECT f_is_root2_eur_cents(2900) AS eur_29_ok,
+       f_is_root2_eur_cents(7400) AS eur_74_ok,
+       f_is_root2_eur_cents(29900) AS eur_299_ok;
+
+3) Tipaj aplicativ (TypeScript) — mirror pentru FE/BE
+// enums.ts
+export type PlanTier = 'free' | 'architect' | 'initiate' | 'elite';
+
+export const PLAN_TIERS: PlanTier[] = ['free','architect','initiate','elite'];
+
+export const PLAN_ACCESS: Record<PlanTier, 10|40|70|100> = {
+  free: 10, architect: 40, initiate: 70, elite: 100
+};
+
+export const PLAN_LABEL: Record<PlanTier, 'Free'|'Arhitect'|'Inițiat'|'Elite'> = {
+  free: 'Free', architect: 'Arhitect', initiate: 'Inițiat', elite: 'Elite'
+};
+
+export const PLAN_RANK: Record<PlanTier, 0|1|2|3> = {
+  free: 0, architect: 1, initiate: 2, elite: 3
+};
+
+// constantă de business (mirroring DB)
+export const DIGITAL_ROOT_REQUIRED = 2 as const;
+
+4) Reguli operative
+
+Folosește DOMAIN eur_cents_root2 pe toate coloanele price_cents.
+
+Menține coloană digital_root GENERATED pentru audit & debug.
+
+Expune în API doar plan_tier + percent_access prin v_plan_tier_map.
+
+Testează f_is_root2_eur_cents() în CI la seed/migrate.
+
+Verdict: fixează „cine are voie” (enum) și „ce e valid” (root=2) în însăși schemă; codul devine gardian, nu convenție.
+
+
+
+
+
+
+neurons — schemă completă, indexuri, trigger root=2, discipline de update
+1) Migrare SQL — tabel + indici + triggere
+-- 01_neurons.sql
+-- Dependințe: pgcrypto (pentru gen_random_uuid), unaccent (opțional pentru search)
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Funcție digital root (pentru EUR, nu cenți)
+CREATE OR REPLACE FUNCTION f_digital_root(n int)
+RETURNS int
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE WHEN n IS NULL OR n <= 0 THEN NULL
+              ELSE 1 + ((n - 1) % 9)
+         END
+$$;
+
+-- Trigger: setează digital_root și validează root=2 pornind de la price_cents/100 (EUR)
+CREATE OR REPLACE FUNCTION trg_neurons_price()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  -- setează digital_root pe baza valorii în EUR (cenți/100)
+  NEW.digital_root := f_digital_root(NEW.price_cents / 100);
+
+  IF NEW.price_cents <= 0 THEN
+    RAISE EXCEPTION 'price_cents must be > 0, got %', NEW.price_cents;
+  END IF;
+
+  IF NEW.digital_root IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Price % cents (=%.2f €) violates digital root = 2 (got %)',
+      NEW.price_cents, NEW.price_cents/100.0, NEW.digital_root;
+  END IF;
+
+  RETURN NEW;
+END
+$$;
+
+-- Trigger: întreținere updated_at
+CREATE OR REPLACE FUNCTION trg_set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := NOW();
+  RETURN NEW;
+END
+$$;
+
+-- ENUM plan_tier, dacă nu există deja
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'plan_tier') THEN
+    CREATE TYPE plan_tier AS ENUM ('free','architect','initiate','elite');
+  END IF;
+END $$;
+
+-- TABEL: neurons (unitatea vândută)
+CREATE TABLE IF NOT EXISTS public.neurons (
+  id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug               text        NOT NULL UNIQUE,
+  title              text        NOT NULL,
+  summary            text        NOT NULL,          -- public preview
+  content_full       text        NOT NULL,          -- gated content
+  required_tier      plan_tier   NOT NULL DEFAULT 'free',
+  price_cents        integer     NOT NULL CHECK (price_cents > 0),
+  digital_root       integer     NOT NULL,          -- setat/validat de trigger (=2)
+  category           text        NOT NULL,
+  tags               text[]      NOT NULL DEFAULT '{}'::text[],
+  depth_score        integer     CHECK (depth_score BETWEEN 1 AND 10),
+  pattern_complexity integer     CHECK (pattern_complexity BETWEEN 1 AND 5),
+  published          boolean     NOT NULL DEFAULT true,
+  created_at         timestamptz NOT NULL DEFAULT NOW(),
+  updated_at         timestamptz NOT NULL DEFAULT NOW()
+);
+
+-- INDEXURI: full-text pe title+summary (funcțional), GIN pe tags
+-- (poți schimba 'english' cu 'simple' sau pipeline cu unaccent dacă ai extensia instalată)
+CREATE INDEX IF NOT EXISTS idx_neurons_search
+  ON public.neurons
+  USING GIN (to_tsvector('english', coalesce(title,'') || ' ' || coalesce(summary,'')));
+
+CREATE INDEX IF NOT EXISTS idx_neurons_tags
+  ON public.neurons
+  USING GIN (tags);
+
+-- (opțional) indexuri suplimentare utile la scale
+CREATE INDEX IF NOT EXISTS idx_neurons_published ON public.neurons (published);
+CREATE INDEX IF NOT EXISTS idx_neurons_category  ON public.neurons (category);
+CREATE INDEX IF NOT EXISTS idx_neurons_required_tier ON public.neurons (required_tier);
+
+-- TRIGGERE
+DROP TRIGGER IF EXISTS neurons_price ON public.neurons;
+CREATE TRIGGER neurons_price
+BEFORE INSERT OR UPDATE OF price_cents
+ON public.neurons
+FOR EACH ROW
+EXECUTE FUNCTION trg_neurons_price();
+
+DROP TRIGGER IF EXISTS neurons_touch_updated_at ON public.neurons;
+CREATE TRIGGER neurons_touch_updated_at
+BEFORE UPDATE
+ON public.neurons
+FOR EACH ROW
+EXECUTE FUNCTION trg_set_updated_at();
+
+2) Relații (cum se prind de restul sistemului)
+
+M:N cu library_tree și bundles, 1:N cu neuron_content_versions. Definițiile FK trăiesc în tabelele pivot / copil:
+
+library_tree_neurons(tree_id FK→library_tree.id, neuron_id FK→neurons.id) — poziționare în sidebar.
+
+bundle_neurons(bundle_id FK→bundles.id, neuron_id FK→neurons.id) — componența bundle-urilor.
+
+neuron_content_versions(neuron_id FK→neurons.id) — istoric și probatoriu legal.
+
+3) Discipline de acces (recomandare minimă)
+
+Servește summary prin view public (v_neuron_public).
+
+Servește content_full doar prin RPC care verifică entitlements/gating; nu expune niciodată SELECT * din tabel în API.
+
+4) Teste rapide (SQL) — validează triggerul
+-- OK (29€ → root=2)
+INSERT INTO neurons (slug,title,summary,content_full,price_cents,category,tags)
+VALUES ('test-29','Test 29','prev','full',2900,'deep','{ai,framework}');
+
+-- FAIL (30€ → root=3)
+INSERT INTO neurons (slug,title,summary,content_full,price_cents,category,tags)
+VALUES ('test-30','Test 30','prev','full',3000,'deep','{ai}')
+-- așteaptă eroare: violates digital root = 2
+;
+
+
+Verdict: blindează valoarea în însăși schemă; fiecare neuron rămâne coerent ca preț, căutabil și versionabil.
+
+
+
+
+
+
+library_tree + pivot — schemă completă, triggere, ltree, relații
+1) Migrare SQL — extensii, funcții utilitare
+-- 02_library_tree.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS ltree;
+
+-- Normalizează "name" → etichetă validă pentru ltree (doar [a-z0-9_], fără gol)
+CREATE OR REPLACE FUNCTION f_ltree_label(src text)
+RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  s text := lower(coalesce(src,''));
+BEGIN
+  -- înlocuiește orice non [a-z0-9_] cu _
+  s := regexp_replace(s, '[^a-z0-9_]+', '_', 'g');
+  -- taie _ la margini
+  s := regexp_replace(s, '^_+|_+$', '', 'g');
+  -- dacă începe cu cifră sau e vid, prefixează
+  IF s = '' OR s ~ '^[0-9]' THEN
+    s := 'n_' || s;
+  END IF;
+  RETURN s;
+END $$;
+
+-- Calculează path pentru un nod: root = label(name); child = parent.path || label(name)
+CREATE OR REPLACE FUNCTION f_library_compute_path(parent UUID, name TEXT)
+RETURNS ltree
+LANGUAGE plpgsql STABLE AS $$
+DECLARE parent_path ltree;
+BEGIN
+  IF parent IS NULL THEN
+    RETURN f_ltree_label(name)::ltree;
+  END IF;
+  SELECT lt.path INTO parent_path FROM public.library_tree lt WHERE lt.id = parent;
+  IF parent_path IS NULL THEN
+    RAISE EXCEPTION 'Parent % not found', parent;
+  END IF;
+  RETURN parent_path || f_ltree_label(name)::ltree;
+END $$;
+
+2) Tabelul library_tree — câmpuri, indici, R/W discipline
+-- ENUM plan_tier creat deja în migrarea anterioară (dacă nu, adaugă-l)
+
+-- TABEL: library_tree (sidebar ierarhic)
+CREATE TABLE IF NOT EXISTS public.library_tree (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  parent_id  uuid NULL REFERENCES public.library_tree(id) ON DELETE CASCADE,
+  name       text NOT NULL,
+  path       ltree NOT NULL,
+  position   int  NOT NULL DEFAULT 0,
+
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+
+  -- un nume identic sub același părinte e ambiguu pentru UX → interzice
+  CONSTRAINT uq_library_sibling_name UNIQUE (parent_id, name)
+);
+
+-- path este identitatea canonică a nodului → unic
+CREATE UNIQUE INDEX IF NOT EXISTS uq_library_tree_path ON public.library_tree USING btree (path);
+
+-- ierarhie & prefix queries
+CREATE INDEX IF NOT EXISTS idx_library_tree_path_gist ON public.library_tree USING GIST (path);
+
+-- navigație rapidă pe frați / ordonare
+CREATE INDEX IF NOT EXISTS idx_library_tree_parent_pos ON public.library_tree (parent_id, position);
+
+-- întreținere updated_at
+CREATE OR REPLACE FUNCTION trg_tree_touch_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS library_tree_touch_updated_at ON public.library_tree;
+CREATE TRIGGER library_tree_touch_updated_at
+BEFORE UPDATE ON public.library_tree
+FOR EACH ROW EXECUTE FUNCTION trg_tree_touch_updated_at();
+
+3) Triggere — setare path, protecție cicluri, repoziționare, propagare subtree
+-- Setează / validează path la INSERT/UPDATE (name, parent_id)
+CREATE OR REPLACE FUNCTION trg_tree_set_path_validate()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  parent_path ltree;
+BEGIN
+  -- Self-parent interzis
+  IF NEW.parent_id IS NOT NULL AND NEW.parent_id = NEW.id THEN
+    RAISE EXCEPTION 'Node cannot be parent of itself';
+  END IF;
+
+  -- Calculează noul path
+  NEW.path := f_library_compute_path(NEW.parent_id, NEW.name);
+
+  -- Interzice mutarea sub propriul subarbore (cicluri)
+  IF TG_OP = 'UPDATE' AND NEW.parent_id IS NOT NULL THEN
+    SELECT path INTO parent_path FROM public.library_tree WHERE id = NEW.parent_id;
+    IF parent_path <@ OLD.path THEN
+      RAISE EXCEPTION 'Cannot move a node under its own subtree';
+    END IF;
+  END IF;
+
+  -- Auto-assign position la finalul listei fraților dacă e 0 (sau negativ)
+  IF NEW.position IS NULL OR NEW.position <= 0 THEN
+    SELECT COALESCE(MAX(position), -1) + 1
+      INTO NEW.position
+      FROM public.library_tree
+     WHERE (parent_id IS NOT DISTINCT FROM NEW.parent_id);
+  END IF;
+
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS library_tree_set_path ON public.library_tree;
+CREATE TRIGGER library_tree_set_path
+BEFORE INSERT OR UPDATE OF name, parent_id, position
+ON public.library_tree
+FOR EACH ROW
+EXECUTE FUNCTION trg_tree_set_path_validate();
+
+-- Propagă schimbarea de path la descendenți (rename/move)
+CREATE OR REPLACE FUNCTION trg_tree_propagate_subtree()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.path != OLD.path THEN
+    -- toate nodurile din subarbore (excluzând nodul) își rescriu prefixul OLD.path → NEW.path
+    UPDATE public.library_tree AS c
+       SET path = NEW.path || subpath(c.path, nlevel(OLD.path))
+     WHERE c.path <@ (OLD.path || '.*')::ltree
+       AND c.id <> NEW.id;
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS library_tree_propagate_subtree ON public.library_tree;
+CREATE TRIGGER library_tree_propagate_subtree
+AFTER UPDATE OF path
+ON public.library_tree
+FOR EACH ROW
+EXECUTE FUNCTION trg_tree_propagate_subtree();
+
+4) Pivot library_tree_neurons — relații, indici, poziționare
+-- TABEL: pivot nod ←→ neuron
+CREATE TABLE IF NOT EXISTS public.library_tree_neurons (
+  tree_id   uuid NOT NULL REFERENCES public.library_tree(id) ON DELETE CASCADE,
+  neuron_id uuid NOT NULL REFERENCES public.neurons(id)      ON DELETE CASCADE,
+  position  int  NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+
+  PRIMARY KEY (tree_id, neuron_id)
+);
+
+-- listări eficiente pe nod + ordonare stabilă
+CREATE INDEX IF NOT EXISTS idx_ltn_tree_pos ON public.library_tree_neurons (tree_id, position);
+-- căutări inverse (unde e atașat un neuron)
+CREATE INDEX IF NOT EXISTS idx_ltn_neuron ON public.library_tree_neurons (neuron_id);
+
+-- dacă vrei auto-assign position la finalul listei, adaugă trigger:
+CREATE OR REPLACE FUNCTION trg_ltn_set_position()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.position IS NULL OR NEW.position <= 0 THEN
+    SELECT COALESCE(MAX(position), -1) + 1 INTO NEW.position
+      FROM public.library_tree_neurons
+     WHERE tree_id = NEW.tree_id;
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS ltn_set_position ON public.library_tree_neurons;
+CREATE TRIGGER ltn_set_position
+BEFORE INSERT ON public.library_tree_neurons
+FOR EACH ROW EXECUTE FUNCTION trg_ltn_set_position();
+
+5) Interogări utile (copy/paste)
+5.1 Inserează nod rădăcină și copil
+-- root
+INSERT INTO public.library_tree (parent_id, name) VALUES (NULL, 'AI Frameworks') RETURNING *;
+
+-- child sub root
+WITH p AS (SELECT id FROM public.library_tree WHERE path = 'ai_frameworks')
+INSERT INTO public.library_tree (parent_id, name, position)
+SELECT p.id, 'Prompt Engineering', 0 FROM p RETURNING *;
+
+5.2 Listă descendenți pentru un nod (paginat)
+-- nodul-țintă
+WITH t AS (
+  SELECT path FROM public.library_tree WHERE path = 'ai_frameworks.prompt_engineering'
+)
+SELECT lt.*
+  FROM public.library_tree lt, t
+ WHERE lt.path <@ (t.path || '.*')::ltree
+ ORDER BY lt.path, lt.position
+ LIMIT 100 OFFSET 0;
+
+5.3 Neuroni atașați unui nod (ordonați)
+WITH n AS (SELECT id FROM public.library_tree WHERE path = 'ai_frameworks.prompt_engineering')
+SELECT nn.*
+  FROM public.library_tree_neurons ltn
+  JOIN public.neurons nn ON nn.id = ltn.neuron_id
+  JOIN n ON n.id = ltn.tree_id
+ ORDER BY ltn.position;
+
+5.4 Mută un nod sub alt părinte (propagă automat path-ul la copii)
+-- exemplu: mută "prompt_engineering" sub "ai_frameworks.cognitive"
+WITH new_parent AS (SELECT id FROM public.library_tree WHERE path = 'ai_frameworks.cognitive'),
+     moved AS (SELECT id FROM public.library_tree WHERE path = 'ai_frameworks.prompt_engineering')
+UPDATE public.library_tree lt
+   SET parent_id = (SELECT id FROM new_parent)
+ WHERE lt.id = (SELECT id FROM moved);
+-- triggerul va recalcula NEW.path și va propaga la subarbore
+
+6) Materialized counts (UX rapid în sidebar) — opțional, dar recomandat
+-- copii direcți / neuroni per nod
+CREATE MATERIALIZED VIEW IF NOT EXISTS public.mv_tree_counts AS
+SELECT
+  lt.id,
+  COUNT(c.id) AS children_count,
+  COUNT(ltn.neuron_id) AS neuron_count
+FROM public.library_tree lt
+LEFT JOIN public.library_tree c  ON c.parent_id = lt.id
+LEFT JOIN public.library_tree_neurons ltn ON ltn.tree_id = lt.id
+GROUP BY lt.id;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_tree_counts_id ON public.mv_tree_counts(id);
+
+-- utilitar de refresh (toată harta sau un nod)
+CREATE OR REPLACE FUNCTION refresh_mv_tree_counts()
+RETURNS void LANGUAGE sql AS $$ REFRESH MATERIALIZED VIEW CONCURRENTLY public.mv_tree_counts; $$;
+
+7) Reguli-cheie respectate
+
+path unic și stabil; calcul determinist prin f_library_compute_path.
+
+Mutări/rename sigure; propagare automată a subarborelui.
+
+Fără cicluri; fără self-parent.
+
+Pivot robust: M:N cu poziționare per nod, cascade corecte.
+
+Indexare: GIST pe path, btree pe (parent_id, position) și pe pivot.
+
+Verdict: structurează pădurea ca un sistem nervos — fiecare nod știe locul, iar semnalul se propagă fără erori.
+
+
+
+
+
+
+bundles + bundle_neurons — schemă completă, indici, triggere root=2
+1) Preliminare (idempotent)
+-- 03_bundles.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ENUM plan_tier (dacă nu există deja)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'plan_tier') THEN
+    CREATE TYPE plan_tier AS ENUM ('free','architect','initiate','elite');
+  END IF;
+END $$;
+
+-- Digital root (EUR din cenți) — sigur de re-rulat
+CREATE OR REPLACE FUNCTION f_digital_root(n int)
+RETURNS int
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE WHEN n IS NULL OR n <= 0 THEN NULL
+              ELSE 1 + ((n - 1) % 9)
+         END
+$$;
+
+-- Updated_at generic
+CREATE OR REPLACE FUNCTION trg_set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END $$;
+
+-- Trigger: calculează digital_root din price_cents/100 (EUR) și validează = 2
+CREATE OR REPLACE FUNCTION trg_bundles_price()
+RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.price_cents IS NULL OR NEW.price_cents <= 0 THEN
+    RAISE EXCEPTION 'price_cents must be > 0, got %', NEW.price_cents;
+  END IF;
+
+  NEW.digital_root := f_digital_root(NEW.price_cents / 100);
+
+  IF NEW.digital_root IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'Bundle price % cents (=%.2f €) violates digital root = 2 (got %)',
+      NEW.price_cents, NEW.price_cents/100.0, NEW.digital_root;
+  END IF;
+
+  RETURN NEW;
+END $$;
+
+2) Tabel: bundles
+CREATE TABLE IF NOT EXISTS public.bundles (
+  id                        uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug                      text        NOT NULL UNIQUE,
+  title                     text        NOT NULL,
+  description               text        NOT NULL,
+  price_cents               integer     NOT NULL CHECK (price_cents > 0),
+  digital_root              integer     NOT NULL,                  -- setat de trigger (=2)
+  required_tier             plan_tier   NOT NULL DEFAULT 'architect',
+  stripe_price_id_one_time  text,                                  -- opțional
+  created_at                timestamptz NOT NULL DEFAULT now(),
+  updated_at                timestamptz NOT NULL DEFAULT now()
+);
+
+-- indici utili
+CREATE INDEX IF NOT EXISTS idx_bundles_required_tier ON public.bundles(required_tier);
+
+-- triggere
+DROP TRIGGER IF EXISTS bundles_price ON public.bundles;
+CREATE TRIGGER bundles_price
+BEFORE INSERT OR UPDATE OF price_cents
+ON public.bundles
+FOR EACH ROW
+EXECUTE FUNCTION trg_bundles_price();
+
+DROP TRIGGER IF EXISTS bundles_touch_updated_at ON public.bundles;
+CREATE TRIGGER bundles_touch_updated_at
+BEFORE UPDATE ON public.bundles
+FOR EACH ROW
+EXECUTE FUNCTION trg_set_updated_at();
+
+3) Pivot: bundle_neurons (M:N)
+CREATE TABLE IF NOT EXISTS public.bundle_neurons (
+  bundle_id  uuid NOT NULL REFERENCES public.bundles(id)  ON DELETE CASCADE,
+  neuron_id  uuid NOT NULL REFERENCES public.neurons(id)  ON DELETE CASCADE,
+  PRIMARY KEY (bundle_id, neuron_id)
+);
+
+-- interogări inverse rapide (unde e inclus un neuron)
+CREATE INDEX IF NOT EXISTS idx_bundle_neurons_neuron ON public.bundle_neurons(neuron_id);
+
+4) Teste rapide (prețuri root=2)
+-- OK: 119€ (1+1+9=11 → 1+1=2)
+INSERT INTO public.bundles (slug,title,description,price_cents,required_tier)
+VALUES ('starter-pack','Starter Pack','10 neuroni de bază', 11900, 'architect');
+
+-- FAIL: 30€ (3+0=3) → aruncă eroare
+INSERT INTO public.bundles (slug,title,description,price_cents,required_tier)
+VALUES ('bad-pack','Bad Pack','invalid root', 3000, 'architect');
+
+
+Verdict: fixează root=2 în schemă, leagă seturile de neuroni fără dubluri, păstrează auditul temporal.
+
+
+
+
+
+plans — abonamente cu gating 10/40/70/100 și prețuri root=2 (complet)
+1) Preliminare (idempotent)
+-- 04_plans.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ENUM (dacă nu e creat)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'plan_tier') THEN
+    CREATE TYPE plan_tier AS ENUM ('free','architect','initiate','elite');
+  END IF;
+END $$;
+
+-- Mapări plan → procent/rank/label (IMMUTABLE)
+CREATE OR REPLACE FUNCTION f_plan_percent_access(t plan_tier)
+RETURNS int LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE t
+    WHEN 'free'      THEN 10
+    WHEN 'architect' THEN 40
+    WHEN 'initiate'  THEN 70
+    WHEN 'elite'     THEN 100
+  END
+$$;
+
+CREATE OR REPLACE FUNCTION f_plan_display_name(t plan_tier)
+RETURNS text LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE t
+    WHEN 'free'      THEN 'Free'
+    WHEN 'architect' THEN 'Arhitect'
+    WHEN 'initiate'  THEN 'Inițiat'
+    WHEN 'elite'     THEN 'Elite'
+  END
+$$;
+
+-- Digital root (pe EUR, din cenți)
+CREATE OR REPLACE FUNCTION f_digital_root(n int)
+RETURNS int LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE WHEN n IS NULL OR n <= 0 THEN NULL ELSE 1 + ((n - 1) % 9) END
+$$;
+
+CREATE OR REPLACE FUNCTION f_is_root2_eur_cents(cents int)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+  SELECT f_digital_root(cents / 100) = 2
+$$;
+
+-- updated_at generic
+CREATE OR REPLACE FUNCTION trg_set_updated_at()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.updated_at := now(); RETURN NEW; END $$;
+
+2) Tabelul plans + constrângeri
+CREATE TABLE IF NOT EXISTS public.plans (
+  id                    uuid       PRIMARY KEY DEFAULT gen_random_uuid(),
+  code                  plan_tier  NOT NULL UNIQUE,  -- 'free'|'architect'|'initiate'|'elite'
+  name                  text       NOT NULL,
+  percent_access        int        NOT NULL,
+  monthly_price_cents   int        NOT NULL,         -- 0 pentru 'free', altfel >0 & root=2
+  annual_price_cents    int        NOT NULL,         -- 0 pentru 'free', altfel >0 & root=2
+  stripe_price_id_month text,
+  stripe_price_id_year  text,
+  created_at            timestamptz NOT NULL DEFAULT now(),
+  updated_at            timestamptz NOT NULL DEFAULT now(),
+
+  -- integritate funcțională: procentul trebuie să corespundă codului
+  CONSTRAINT ck_plans_percent MATCH SIMPLE
+    CHECK (percent_access = f_plan_percent_access(code)),
+
+  -- 'free' = gratuit; restul >0
+  CONSTRAINT ck_plans_free_pricing
+    CHECK (
+      (code = 'free' AND monthly_price_cents = 0 AND annual_price_cents = 0)
+      OR
+      (code <> 'free' AND monthly_price_cents > 0 AND annual_price_cents > 0)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_plans_percent ON public.plans(percent_access);
+
+3) Triggere — nume implicit + root=2 pentru non-free
+-- setează automat name dacă e null
+CREATE OR REPLACE FUNCTION trg_plans_default_name()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.name IS NULL OR length(btrim(NEW.name)) = 0 THEN
+    NEW.name := f_plan_display_name(NEW.code);
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- validează root=2 pe prețuri NON-FREE + stripe ids prezente
+CREATE OR REPLACE FUNCTION trg_plans_validate_prices()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.code <> 'free' THEN
+    IF NOT f_is_root2_eur_cents(NEW.monthly_price_cents) THEN
+      RAISE EXCEPTION 'Monthly price %c (=%.2f€) must have digital root 2',
+        NEW.monthly_price_cents, NEW.monthly_price_cents/100.0;
+    END IF;
+
+    IF NOT f_is_root2_eur_cents(NEW.annual_price_cents) THEN
+      RAISE EXCEPTION 'Annual price %c (=%.2f€) must have digital root 2',
+        NEW.annual_price_cents, NEW.annual_price_cents/100.0;
+    END IF;
+
+    IF NEW.stripe_price_id_month IS NULL OR NEW.stripe_price_id_year IS NULL THEN
+      RAISE EXCEPTION 'Stripe price IDs (month/year) must be set for % plan', NEW.code;
+    END IF;
+  ELSE
+    -- free: stripe ids trebuie să fie NULL și prețuri 0 (asigurat și de CHECK)
+    NEW.stripe_price_id_month := NULL;
+    NEW.stripe_price_id_year  := NULL;
+  END IF;
+
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS plans_default_name ON public.plans;
+CREATE TRIGGER plans_default_name
+BEFORE INSERT OR UPDATE OF name, code
+ON public.plans
+FOR EACH ROW EXECUTE FUNCTION trg_plans_default_name();
+
+DROP TRIGGER IF EXISTS plans_validate_prices ON public.plans;
+CREATE TRIGGER plans_validate_prices
+BEFORE INSERT OR UPDATE OF monthly_price_cents, annual_price_cents, code, stripe_price_id_month, stripe_price_id_year
+ON public.plans
+FOR EACH ROW EXECUTE FUNCTION trg_plans_validate_prices();
+
+DROP TRIGGER IF EXISTS plans_touch_updated_at ON public.plans;
+CREATE TRIGGER plans_touch_updated_at
+BEFORE UPDATE ON public.plans
+FOR EACH ROW EXECUTE FUNCTION trg_set_updated_at();
+
+4) Seed (respectă digital root 2; poți înlocui Stripe IDs după creare)
+-- FREE (0€ / 0€)
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('free', 'Free', 10, 0, 0, NULL, NULL)
+ON CONFLICT (code) DO NOTHING;
+
+-- ARCHITECT (29€/lună; 299€/an) → root=2
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('architect', 'Arhitect', 40, 2900, 29900,
+        'price_arch_month_replace', 'price_arch_year_replace')
+ON CONFLICT (code) DO NOTHING;
+
+-- INITIATE (74€/lună; 749€/an) → root=2
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('initiate', 'Inițiat', 70, 7400, 74900,
+        'price_init_month_replace', 'price_init_year_replace')
+ON CONFLICT (code) DO NOTHING;
+
+-- ELITE (299€/lună; 2999€/an) → root=2
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('elite', 'Elite', 100, 29900, 299900,
+        'price_elite_month_replace', 'price_elite_year_replace')
+ON CONFLICT (code) DO NOTHING;
+
+5) Teste rapide (rulează în SQL)
+-- 1) procent ↔ cod (validare CHECK)
+SELECT code, percent_access, f_plan_percent_access(code) AS must_be
+FROM public.plans;
+
+-- 2) root=2: trebuie TRUE pentru non-free
+SELECT code,
+       f_digital_root(monthly_price_cents/100) AS m_root,
+       f_digital_root(annual_price_cents/100)  AS y_root
+FROM public.plans
+WHERE code <> 'free';
+
+-- 3) încearcă să inserezi un plan invalid (vaiola root=2) → eroare
+INSERT INTO public.plans (code, name, percent_access, monthly_price_cents, annual_price_cents,
+                          stripe_price_id_month, stripe_price_id_year)
+VALUES ('architect', 'Arhitect BAD', 40, 3000, 36000, 'X', 'Y');  -- trebuie să fie blocat
+
+
+Verdict: fixează matematica planurilor în schemă. Gatingul devine determinist. Stripe-ul are contract clar. Prețurile nu scapă de regula root=2.

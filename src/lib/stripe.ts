@@ -16,34 +16,35 @@ export const STRIPE_CONFIG = {
 
 // Tier pricing mapping based on digital root 2 algorithm
 export const TIER_PRICES = {
-  explorer: 2900, // €29.00 in cents - digital root 2 (2+9=11, 1+1=2)
-  architect: 11000, // €110.00 in cents - digital root 2 (1+1+0=2)  
-  initiate: 20000, // €200.00 in cents - digital root 2 (2+0+0=2)
-  master: 29900, // €299.00 in cents - digital root 2 (2+9+9=20, 2+0=2)
+  free: 0, // €0.00 - Free tier
+  architect: 2900, // €29.00 in cents - digital root 2 (2+9=11, 1+1=2)
+  initiate: 4700, // €47.00 in cents - digital root 2 (4+7=11, 1+1=2)  
+  elite: 7400, // €74.00 in cents - digital root 2 (7+4=11, 1+1=2)
 } as const;
 
 export const TIER_NAMES = {
-  explorer: 'Explorer',
+  free: 'Free',
   architect: 'Architect', 
   initiate: 'Initiate',
-  master: 'Master',
+  elite: 'Elite',
 } as const;
 
 export const TIER_DESCRIPTIONS = {
-  explorer: 'Essential cognitive frameworks for beginners',
+  free: 'Essential cognitive frameworks for beginners',
   architect: 'Advanced frameworks with premium templates',
   initiate: 'Professional-grade content and priority support',
-  master: 'Complete access with exclusive frameworks and 1-on-1 consultations',
+  elite: 'Complete access with exclusive frameworks and 1-on-1 consultations',
 } as const;
 
 export const TIER_FEATURES = {
-  explorer: [
-    '50+ Basic Cognitive Frameworks',
-    'PDF Downloads',
+  free: [
+    '10% din librăria completă',
+    'Framework-uri de bază',
     'Community Access',
     'Email Support'
   ],
   architect: [
+    '40% din librăria completă',
     '200+ Advanced Frameworks',
     'Interactive Templates',
     'Priority Community Access',
@@ -51,6 +52,7 @@ export const TIER_FEATURES = {
     'Advanced Search & Filters'
   ],
   initiate: [
+    '70% din librăria completă',
     '500+ Professional Frameworks',
     'Custom Template Builder',
     'VIP Community Access',
@@ -58,9 +60,9 @@ export const TIER_FEATURES = {
     'Priority Support',
     'Framework Analytics'
   ],
-  master: [
-    'Unlimited Framework Access',
-    'Exclusive Master-Level Content',
+  elite: [
+    '100% din librăria completă',
+    'Exclusive Elite Content',
     'Personal AI Assistant Integration',
     '1-on-1 Consultation Sessions',
     'Custom Framework Development',
@@ -69,7 +71,7 @@ export const TIER_FEATURES = {
   ],
 } as const;
 
-export type UserTier = keyof typeof TIER_PRICES;
+export type UserTier = 'free' | 'architect' | 'initiate' | 'elite';
 
 export function getTierPrice(tier: UserTier): number {
   return TIER_PRICES[tier];
@@ -92,7 +94,7 @@ export function formatPrice(cents: number): string {
 }
 
 export function isTierAccessible(userTier: UserTier, requiredTier: UserTier): boolean {
-  const tierOrder: UserTier[] = ['explorer', 'architect', 'initiate', 'master'];
+  const tierOrder: UserTier[] = ['free', 'architect', 'initiate', 'elite'];
   const userTierIndex = tierOrder.indexOf(userTier);
   const requiredTierIndex = tierOrder.indexOf(requiredTier);
   

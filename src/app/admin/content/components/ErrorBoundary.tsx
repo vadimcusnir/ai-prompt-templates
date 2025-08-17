@@ -113,7 +113,7 @@ class ErrorBoundary extends Component<Props, State> {
             Something went wrong
           </h2>
           <p style={{ color: '#6b7280', marginBottom: '1.5rem' }}>
-            We've encountered an unexpected error. Our team has been notified.
+            We&apos;ve encountered an unexpected error. Our team has been notified.
           </p>
           
           <div style={{ marginBottom: '1.5rem' }}>

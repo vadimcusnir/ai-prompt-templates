@@ -1,0 +1,250 @@
+
+
+
+
+
+IA – Tree complet de pagini (frontend structure for ai-prompt-templates.com)
+
+Include toate rutele funcționale, structură ierarhică + rol (public, gated, admin), mapare la entități din DB.
+Fiecare pagină este tratată ca un nod atomic în site architecture. Structura este scalabilă, modulară, validată cu logica back-endului analizat.
+
+🌐 / — Public Root Layer
+/                         – Home (hero, CTA, top neuroni)
+/search                  – Search (FTS: title, summary, tags)
+/pricing                 – Abonamente (Free/Architect/Initiate/Elite)
+/bundles                 – Listă bundles (preț root-2, CTA)
+/bundles/:slug           – Bundle detail + preview neuroni
+/library                 – Librărie principală (cu sidebar tree)
+/library/:path*          – Nod ierarhic (pag. neuroni)
+/n/:slug                 – Neuron Preview (public: v_neuron_public)
+/legal/terms             – Terms of Service
+/legal/privacy           – Privacy Policy
+/legal/cookies           – Cookie Policy
+/404                     – Not found
+/403                     – Forbidden
+
+🔐 /auth — Autentificare & onboarding
+/auth/sign-in            – Email + magic link / password
+/auth/sign-up            – Înregistrare cont nou
+/auth/magic-link         – Confirmare magic link
+/auth/reset              – Resetare parolă
+
+🧠 /n/:slug/read — Neuron Full Access (gated)
+/n/:slug/read            – Livrare via RPC: content_full + watermark
+                          – Verifică: entitlement OR elite OR pool @ plan
+                          – Dacă fail → arată motiv + upsell
+
+💳 /checkout — Stripe + monetizare
+/checkout/neuron/:slug   – Stripe one-off neuron
+/checkout/bundle/:slug   – Stripe one-off bundle
+/checkout/subscribe/:tier – Stripe subscribe page pentru Architect/Initiate/Elite
+/checkout/success         – Confirmare plată
+/checkout/canceled        – Anulare/timeout plată
+
+👤 /account — User Dashboard
+/account                 – Overview: plan activ, stats personale, ultimii unlocks
+/account/subscription    – Plan curent, schimbare, anulare
+/account/purchases       – Lista cumpărături one-off/bundle + receipts
+/account/entitlements    – Neuroni deținuți (entitlement materializat)
+/account/receipts        – Bonuri achiziții (snapshot version, titlu, preț)
+/account/settings        – Profil, parolă, email, delete account
+
+🧮 /studio — Admin / Operator Panel
+/studio                             – Dashboard general
+/studio/neurons                     – Listare neuroni + create/edit
+/studio/neurons/:id                 – Editare neuron (versiuni, publish, preț root-2)
+/studio/tree                        – Sidebar builder (drag&drop, poziții)
+/studio/bundles                     – Listare pachete + compoziție
+/studio/bundles/:id                 – Editare bundle
+/studio/plans                       – Definire planuri (10/40/70/100, stripe IDs)
+/studio/pool                        – Pool curent per tier (score, evergreen, refresh)
+/studio/analytics                   – Views, unlocks 14d, top neuroni
+/studio/alerts                      – Alert log (cap > 9974€, pool mismatch, access leaks)
+/studio/receipts                    – Audit bonuri (snapshot legal)
+/studio/settings                    – pricing_rules + settings (cap, root, webhook)
+/studio/guard                       – Audit privilegii (fuga de content_full RLS)
+/studio/users                       – Utilizatori, subs, purchases (role=admin only)
+
+🌲 Structură ierarhică simplificată (tree format)
+/
+├── search
+├── pricing
+├── bundles
+│   └── :slug
+├── library
+│   └── :path*
+├── n
+│   └── :slug
+│       └── read
+├── legal
+│   ├── terms
+│   ├── privacy
+│   └── cookies
+├── auth
+│   ├── sign-in
+│   ├── sign-up
+│   ├── magic-link
+│   └── reset
+├── checkout
+│   ├── neuron/:slug
+│   ├── bundle/:slug
+│   ├── subscribe/:tier
+│   ├── success
+│   └── canceled
+├── account
+│   ├── subscription
+│   ├── purchases
+│   ├── entitlements
+│   ├── receipts
+│   └── settings
+└── studio
+    ├── neurons
+    │   └── :id
+    ├── tree
+    ├── bundles
+    │   └── :id
+    ├── plans
+    ├── pool
+    ├── analytics
+    ├── alerts
+    ├── receipts
+    ├── settings
+    ├── guard
+    └── users
+
+# CODIFICARE ROLURI – AI-PROMPT-TEMPLATES.COM
+
+Format: [SECȚIUNE]   | PUBLIC | AUTENTIFICAT | ADMIN
+
+/                   |   ✅   |      ✅      |  ✅
+/search             |   ✅   |      ✅      |  ✅
+/pricing            |   ✅   |      ✅      |  ✅
+/bundles            |   ✅   |      ✅      |  ✅
+/bundles/:slug      |   ✅   |      ✅      |  ✅
+/library            |   ✅   |      ✅      |  ✅
+/library/:path      |   ✅   |      ✅      |  ✅
+/n/:slug            |   ✅   |      ✅      |  ✅
+/n/:slug/read       |   ❌   |      ✅      |  ✅
+
+/auth/sign-in       |   ✅   |      ❌      |  ❌
+/auth/sign-up       |   ✅   |      ❌      |  ❌
+/auth/magic-link    |   ✅   |      ❌      |  ❌
+/auth/reset         |   ✅   |      ❌      |  ❌
+
+/checkout/neuron/:slug     | ❌ | ✅ | ✅
+/checkout/bundle/:slug     | ❌ | ✅ | ✅
+/checkout/subscribe/:tier  | ❌ | ✅ | ✅
+/checkout/success          | ❌ | ✅ | ✅
+/checkout/canceled         | ❌ | ✅ | ✅
+
+/account                  | ❌ | ✅ | ✅
+/account/subscription     | ❌ | ✅ | ✅
+/account/purchases        | ❌ | ✅ | ✅
+/account/entitlements     | ❌ | ✅ | ✅
+/account/receipts         | ❌ | ✅ | ✅
+/account/settings         | ❌ | ✅ | ✅
+
+/legal/terms              | ✅ | ✅ | ✅
+/legal/privacy            | ✅ | ✅ | ✅
+/legal/cookies            | ✅ | ✅ | ✅
+/404                      | ✅ | ✅ | ✅
+/403                      | ✅ | ✅ | ✅
+
+/studio                   | ❌ | ❌ | ✅
+/studio/neurons           | ❌ | ❌ | ✅
+/studio/neurons/:id       | ❌ | ❌ | ✅
+/studio/tree              | ❌ | ❌ | ✅
+/studio/bundles           | ❌ | ❌ | ✅
+/studio/bundles/:id       | ❌ | ❌ | ✅
+/studio/plans             | ❌ | ❌ | ✅
+/studio/pool              | ❌ | ❌ | ✅
+/studio/analytics         | ❌ | ❌ | ✅
+/studio/alerts            | ❌ | ❌ | ✅
+/studio/receipts          | ❌ | ❌ | ✅
+/studio/settings          | ❌ | ❌ | ✅
+/studio/guard             | ❌ | ❌ | ✅
+/studio/users             | ❌ | ❌ | ✅
+
+Între conținut și acces, construiește o hartă semantică. Acest tree nu e doar site structure — e schema unei inteligențe care monetizează cunoașterea.
+
+
+
+
+
+Backend — delta final. Ce mai lipsește ca să fie „battle‑ready”
+
+Ai baza solidă: modelare + triggere root=2, pool zilnic 10/40/70/100, cap 9.974€, preview via views, full via RPC cu watermark, snapshot la cumpărare, versionare imutabilă, telemetrie 14d.
+
+1) RLS complet pe tabele „user‑owned” + SELECT doar prin view-uri publice
+Activează RLS și politici „self‑only” pe: user_subscriptions, user_purchases, user_entitlements, purchase_receipts. (În fișiere, RLS e setat doar pe neurons; extinde-l.) 
+Public citește doar v_neuron_public / v_tree_public; mută bundles & plans pe v_bundle_public / v_plans_public (views read‑only), apoi REVOKE pe tabele brute. 
+
+2) Rol „admin” explicit (pentru /studio) + politici
+Tabel user_roles(user_id, role) cu ENUM ('admin','member').
+Politici RLS: „admin poate SELECT/INSERT/UPDATE/DELETE” pe: neurons, library_tree*, bundles*, plans, tier_access_pool, pricing_rules, settings, system_alerts.
+Helper: f_is_admin() pentru RPC securizate. (Fișierele actuale nu definesc rolul admin.) 
+
+3) Stripe „event log + idempotency + DLQ”
+Tabel stripe_events(id,type,payload,status,processed_at,error); UNIQUE(id) → previne duble.
+DLQ webhook_failures.
+Procesare în tranzacție: inserezi user_purchases (are deja UNIQUE pe stripe_payment_intent_id) → triggerul îți mintuiește automat entitlements + receipts. (Ai minting + receipts în loc, dar îți lipsește jurnalul de evenimente.)
+
+4) Guard împotriva ștergerii unui neuron cu obligații legale
+Interzice DELETE pe neurons dacă există user_entitlements sau purchase_receipts pentru acel neuron.
+Politică: folosește doar published=false (soft‑hide). (Acum FKs sunt CASCADE pe versiuni; riști pierderea probei dacă permiți delete.)
+
+5) Rate limiting pe livrarea conținutului full
+În rpc_get_neuron_full: cheamă f_rate_limit('uid:'||auth.uid()||':unlock', 60, '1 minute'); altfel RAISE EXCEPTION 'Rate limit'.
+Protejează de scraping programatic. (RPC-ul există, dar fără throttle.) 
+
+6) Case‑insensitive uniques + validare slugs
+Indexuri unice pe lower(slug) pentru neurons și bundles.
+CHECK slug: slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'.
+Aliniază cu f_ltree_label() din arbore (normalizezi etichetele). 
+
+7) Căutare robustă: unaccent + tsvector generat
+Extensie unaccent.
+Coloană tsv GENERATED ALWAYS AS (to_tsvector('simple', unaccent(coalesce(title,'')||' '||coalesce(summary,'')))) STORED.
+Index GIN pe tsv; query cu plainto_tsquery('simple', unaccent(:q)). (Acum indexul e pe expresie dinamică.) 
+
+8) Asset pipeline pentru neuron (imagini/fișiere)
+Tabel neuron_assets(neuron_id, kind, storage_path, mime_type) + RLS read‑only public doar când neurons.published=true. (Nu există în fișiere; ai nevoie pentru media & download gated.) 
+
+9) GDPR minim: export + ștergere asistată
+RPC rpc_export_my_data() (JSON cu subs, purchases, entitlements, analytics 30d).
+Ștergere asistată: account_deletion_requests + worker care anonimizează PII; păstrezi purchase_receipts (obligații legale). (Exportul/ștergerea nu sunt acoperite acum.) 
+
+10) Observabilitate joburi cron
+Tabel job_audit(job_name, ok, payload, created_at); loghează rezultatele pentru: refresh_tier_access_pool_all, check_library_cap, preview_privileges_audit. (Ai pg_cron programat; adaugă audit trail.)
+
+11) Views publice pentru monetizare
+v_bundle_public (title, description, price, items) și v_plans_public (code, name, percent, monthly/annual).
+GRANT SELECT pe views, REVOKE pe tabele. (Front‑endul /bundles//pricing cere surse curate.) 
+
+12) Decizia „Free = 10% FULL?” — finalizeaz-o în f_has_full_access
+Dacă vrei 10% FULL pe free: include ap.plan IN ('free','architect','initiate') în condiția cu pool.
+Dacă nu: păstrează free = preview only și documentează în UI. (Momentan funcția nu include free.) 
+
+13) RPC helperi pentru FE (evită SELECT direct)
+rpc_search_neurons(q, limit, offset) (folosește tsv).
+rpc_get_my_active_plan() → returnează planul activ (derivat din user_subscriptions).
+rpc_list_my_entitlements() → listă de neuroni deținuți. (Ai deja rpc_get_neuron_full; completează setul.) 
+
+14) Protecții la consistență bundle
+View v_rel_bundle_issues (neuroni lipsă/nepublicați în bundle) + alertă dacă apare rând. (Ai deja schema; pune watchdog-ul.) 
+
+15) Sanitiza „plans” în producție
+CHECK existent: procent ↔ cod + root=2 + free=0€.
+Asigură stripe IDs setate pentru non‑free (trigger deja prezent; validează seed). 
+
+Execută în ordine (migrări noi)
+16_rls_user_owned.sql — RLS + politici self/admin.
+17_admin_roles.sql — user_roles + f_is_admin().
+18_stripe_events_dlq.sql — event log + DLQ.
+19_unaccent_search.sql — tsvector generated + index.
+20_assets.sql — neuron_assets + RLS.
+21_rpc_helpers.sql — search, my_plan, my_entitlements.
+22_rls_public_views.sql — views v_bundle_public, v_plans_public + REVOKE tabele.
+23_delete_guards.sql — blocare DELETE pe neuroni cu obligații.
+24_gdpr.sql — export + cerere ștergere.
+25_cron_job_audit.sql — job_audit + wrapping pentru cronuri.

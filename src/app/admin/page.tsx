@@ -90,7 +90,7 @@ export default function AdminDashboard() {
     )
   }
 
-  if (!user || userTier !== 'master') {
+  if (!user || userTier !== 'elite') {
     return (
       <div style={{ padding: '2rem', textAlign: 'center' }}>
         <h2>Access Denied</h2>

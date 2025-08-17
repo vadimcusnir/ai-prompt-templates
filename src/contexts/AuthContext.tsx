@@ -5,7 +5,7 @@ import { createClientSideClient } from '@/lib/supabase'
 import { User } from '@supabase/supabase-js'
 import { logger, logSecurity, logError } from '@/lib/logger'
 
-type UserTier = 'explorer' | 'architect' | 'initiate' | 'master'
+type UserTier = 'free' | 'architect' | 'initiate' | 'elite'
 
 type AuthContextType = {
   user: User | null
@@ -22,7 +22,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
-  const [userTier, setUserTier] = useState<UserTier>('explorer')
+  const [userTier, setUserTier] = useState<UserTier>('free')
   
   const supabase = createClientSideClient()
 
@@ -36,9 +36,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .single()
       
       if (error || !subscription) {
-        // No active subscription, user is explorer tier
-        logger.info('User has no active subscription, defaulting to explorer tier', { userId })
-        setUserTier('explorer')
+        // No active subscription, user is free tier
+        logger.info('User has no active subscription, defaulting to free tier', { userId })
+        setUserTier('free')
       } else {
         logger.info('User tier retrieved successfully', { 
           userId, 
@@ -51,7 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         userId, 
         error: error instanceof Error ? error.message : 'Unknown error' 
       })
-      setUserTier('explorer')
+              setUserTier('free')
     }
   }, [supabase])
 
@@ -91,7 +91,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (session?.user) {
           await getUserTier(session.user.id)
         } else {
-          setUserTier('explorer')
+          setUserTier('free')
         }
         
         setLoading(false)

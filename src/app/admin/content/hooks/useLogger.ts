@@ -32,7 +32,7 @@ export const useLogger = (componentName: string, config?: Partial<LoggerConfig>)
   const finalConfig = { ...defaultConfig, ...config }
   const logsRef = useRef<LogEntry[]>([])
   const sessionIdRef = useRef<string>(`session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`)
-  const flushTimeoutRef = useRef<NodeJS.Timeout>()
+  const flushTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
   // Generate unique log ID
   const generateLogId = useCallback(() => {

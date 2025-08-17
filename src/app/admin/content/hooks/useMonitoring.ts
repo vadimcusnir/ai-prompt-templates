@@ -55,7 +55,7 @@ export const useMonitoring = (config?: Partial<MonitoringConfig>) => {
   const metricsRef = useRef<MetricData[]>([])
   const eventsRef = useRef<EventData[]>([])
   const performanceRef = useRef<PerformanceData[]>([])
-  const flushTimeoutRef = useRef<NodeJS.Timeout>()
+  const flushTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
   // Generate unique ID
   const generateId = useCallback(() => {

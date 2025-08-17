@@ -1,0 +1,892 @@
+
+
+
+
+
+user_subscriptions — Stripe → acces (schemă, indici, triggere, reguli)
+1) Migrare SQL (idempotent, strict pe cerințe)
+-- 05_user_subscriptions.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ENUM plan_tier (dacă nu există deja)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'plan_tier') THEN
+    CREATE TYPE plan_tier AS ENUM ('free','architect','initiate','elite');
+  END IF;
+END $$;
+
+-- utilitar: updated_at
+CREATE OR REPLACE FUNCTION trg_set_updated_at()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END $$;
+
+-- validări perioadă + coerență câmpuri Stripe
+CREATE OR REPLACE FUNCTION trg_user_subs_validate()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  -- status limitat la {active,canceled,past_due} (cerință)
+  IF NEW.status NOT IN ('active','canceled','past_due') THEN
+    RAISE EXCEPTION 'Invalid status: %', NEW.status;
+  END IF;
+
+  -- perioade: dacă ambele setate, end > start
+  IF NEW.current_period_start IS NOT NULL
+     AND NEW.current_period_end   IS NOT NULL
+     AND NEW.current_period_end  <= NEW.current_period_start THEN
+    RAISE EXCEPTION 'current_period_end must be > current_period_start';
+  END IF;
+
+  -- normalizează IDs Stripe (trailing spaces)
+  IF NEW.stripe_customer_id IS NOT NULL THEN
+    NEW.stripe_customer_id := btrim(NEW.stripe_customer_id);
+  END IF;
+  IF NEW.stripe_subscription_id IS NOT NULL THEN
+    NEW.stripe_subscription_id := btrim(NEW.stripe_subscription_id);
+  END IF;
+
+  RETURN NEW;
+END $$;
+
+-- TABEL: user_subscriptions
+CREATE TABLE IF NOT EXISTS public.user_subscriptions (
+  id                       uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                  uuid        NOT NULL REFERENCES auth.users (id),
+  plan                     plan_tier   NOT NULL REFERENCES public.plans (code),
+  stripe_customer_id       text,
+  stripe_subscription_id   text,
+  status                   text        NOT NULL,  -- 'active'|'canceled'|'past_due'
+  current_period_start     timestamptz,
+  current_period_end       timestamptz,
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  updated_at               timestamptz NOT NULL DEFAULT now(),
+
+  -- integritate minimă: dacă status='active', trebuie să avem perioadă definită
+  CONSTRAINT ck_user_subs_active_period
+    CHECK (status <> 'active'
+           OR (current_period_start IS NOT NULL AND current_period_end IS NOT NULL))
+);
+
+-- indici ceruți + utili
+CREATE INDEX IF NOT EXISTS idx_user_subs_user     ON public.user_subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_subs_stripe   ON public.user_subscriptions(stripe_subscription_id);
+CREATE INDEX IF NOT EXISTS idx_user_subs_customer ON public.user_subscriptions(stripe_customer_id);
+CREATE INDEX IF NOT EXISTS idx_user_subs_status   ON public.user_subscriptions(status);
+CREATE INDEX IF NOT EXISTS idx_user_subs_period_end ON public.user_subscriptions(current_period_end DESC);
+
+-- unicitate Stripe subscription id (ignoră NULL)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_subs_stripe_unique
+  ON public.user_subscriptions(stripe_subscription_id)
+  WHERE stripe_subscription_id IS NOT NULL;
+
+-- 1 singură subs 'active' per user (hard rule)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_subs_active_per_user
+  ON public.user_subscriptions(user_id)
+  WHERE status = 'active';
+
+-- triggere
+DROP TRIGGER IF EXISTS user_subs_validate ON public.user_subscriptions;
+CREATE TRIGGER user_subs_validate
+BEFORE INSERT OR UPDATE
+ON public.user_subscriptions
+FOR EACH ROW EXECUTE FUNCTION trg_user_subs_validate();
+
+DROP TRIGGER IF EXISTS user_subs_touch_updated_at ON public.user_subscriptions;
+CREATE TRIGGER user_subs_touch_updated_at
+BEFORE UPDATE ON public.user_subscriptions
+FOR EACH ROW EXECUTE FUNCTION trg_set_updated_at();
+
+2) Contracte operaționale (reguli executabile)
+
+FK plan: plan leagă direct la plans(code) → sincron cu gating 10/40/70/100.
+
+Unicitate Stripe: stripe_subscription_id nu se duplică (partial unique).
+
+O singură activă/user: ux_user_subs_active_per_user impune 1 activă per user.
+
+Perioadă validă: dacă status='active', ambele perioade setate și coerente.
+
+Normalizare: btrim() pe IDs Stripe în trigger (evită dubluri din spații).
+
+3) Interogări utilitare (copy/paste)
+-- subs activă pentru un user
+SELECT *
+FROM public.user_subscriptions
+WHERE user_id = :uid AND status = 'active'
+ORDER BY current_period_end DESC
+LIMIT 1;
+
+-- toți userii cu subs expirat(ă) în ultimele 24h (pentru reconciliere)
+SELECT *
+FROM public.user_subscriptions
+WHERE status = 'active'
+  AND current_period_end < now()
+  AND current_period_end > now() - interval '24 hours';
+
+4) Teste rapide
+-- 1) Inserează valid
+INSERT INTO public.user_subscriptions (user_id, plan, status, current_period_start, current_period_end)
+VALUES ('00000000-0000-0000-0000-000000000001','architect','active', now(), now() + interval '30 days');
+
+-- 2) Blochează perioadă invalidă
+INSERT INTO public.user_subscriptions (user_id, plan, status, current_period_start, current_period_end)
+VALUES ('00000000-0000-0000-0000-000000000001','architect','active', now(), now() - interval '1 day'); -- eroare
+
+-- 3) Blochează două active pentru același user
+INSERT INTO public.user_subscriptions (user_id, plan, status, current_period_start, current_period_end)
+VALUES ('00000000-0000-0000-0000-000000000001','initiate','active', now(), now() + interval '30 days'); -- eroare (unique parțial)
+
+5) Note de integrare Stripe (aliniere cu flow)
+
+Creează/actualizează rândurile doar din webhook-uri Stripe (customer.subscription.created|updated|deleted).
+
+Folosește idempotency la nivel de eveniment (tabel separat stripe_events cu event_id UNIQUE) pentru a evita dublurile.
+
+La canceled sau past_due, păstrează istoric; nu șterge rândurile.
+
+Entitlements se calculează în fluxul tău de acces, nu în acest tabel.
+
+Verdict: securizează abonamentele ca un contact ferm între Stripe și gating – un tunel curat, fără scurgeri.
+
+
+
+
+
+
+user_purchases — one-off & bundle → entitlements minting
+1) Migrare SQL — schemă, indici, reguli, triggere
+-- 06_user_purchases.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- asigură tipul plan_tier și tabelele-țintă există (neurons, bundles, user_entitlements)
+-- (nu le recrea aici; doar validează ordine de rulare a migrațiilor)
+
+-- ── UTILITARE ────────────────────────────────────────────────────────────────
+-- updated_at generic (dacă îl folosești în alte tabele)
+CREATE OR REPLACE FUNCTION trg_set_updated_at()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.updated_at := now(); RETURN NEW; END $$;
+
+-- XOR validator: exact UNUL dintre neuron_id / bundle_id trebuie setat
+CREATE OR REPLACE FUNCTION f_xor_neuron_bundle(neuron uuid, bundle uuid)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+  SELECT ((neuron IS NOT NULL)::int + (bundle IS NOT NULL)::int) = 1
+$$;
+
+-- ── TABEL: user_purchases ───────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.user_purchases (
+  id                       uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                  uuid        NOT NULL REFERENCES auth.users (id),
+  neuron_id                uuid        NULL  REFERENCES public.neurons (id) ON DELETE RESTRICT,
+  bundle_id                uuid        NULL  REFERENCES public.bundles (id) ON DELETE RESTRICT,
+  stripe_payment_intent_id text        NULL,
+  amount_cents             integer     NOT NULL CHECK (amount_cents > 0),
+  created_at               timestamptz NOT NULL DEFAULT now(),
+
+  -- exact UNUL dintre neuron_id / bundle_id
+  CONSTRAINT ck_up_xor_single_or_bundle CHECK (f_xor_neuron_bundle(neuron_id, bundle_id))
+);
+
+-- indici
+CREATE INDEX IF NOT EXISTS idx_user_purchases_user ON public.user_purchases(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_purchases_created ON public.user_purchases(created_at DESC);
+
+-- idempotency Stripe (nu dubla achizițiile reluate din webhook)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user_purchases_payment_intent
+  ON public.user_purchases(stripe_payment_intent_id)
+  WHERE stripe_payment_intent_id IS NOT NULL;
+
+-- interzice modificarea câmpurilor identitare după INSERT (user_id, neuron_id, bundle_id)
+CREATE OR REPLACE FUNCTION trg_up_immutable_keys()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.user_id   <> OLD.user_id
+    OR NEW.neuron_id IS DISTINCT FROM OLD.neuron_id
+    OR NEW.bundle_id IS DISTINCT FROM OLD.bundle_id THEN
+      RAISE EXCEPTION 'user_id / neuron_id / bundle_id are immutable after creation';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS user_purchases_immutable_keys ON public.user_purchases;
+CREATE TRIGGER user_purchases_immutable_keys
+BEFORE UPDATE ON public.user_purchases
+FOR EACH ROW EXECUTE FUNCTION trg_up_immutable_keys();
+
+-- ── MINT ENTITLEMENTS: AFTER INSERT ─────────────────────────────────────────
+-- presupune tabela public.user_entitlements(user_id, neuron_id, source, granted_at)
+-- PRIMARY KEY (user_id, neuron_id)
+CREATE OR REPLACE FUNCTION trg_up_mint_entitlements()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  -- single neuron purchase → un singur entitlement
+  IF NEW.neuron_id IS NOT NULL THEN
+    INSERT INTO public.user_entitlements(user_id, neuron_id, source, granted_at)
+    VALUES (NEW.user_id, NEW.neuron_id, 'single', now())
+    ON CONFLICT (user_id, neuron_id) DO NOTHING;
+    RETURN NEW;
+  END IF;
+
+  -- bundle purchase → entitlement pentru TOȚI neuronii din bundle
+  IF NEW.bundle_id IS NOT NULL THEN
+    INSERT INTO public.user_entitlements(user_id, neuron_id, source, granted_at)
+    SELECT NEW.user_id, bn.neuron_id, 'bundle', now()
+      FROM public.bundle_neurons bn
+     WHERE bn.bundle_id = NEW.bundle_id
+    ON CONFLICT (user_id, neuron_id) DO NOTHING;
+    RETURN NEW;
+  END IF;
+
+  -- fallback (n-ar trebui să ajungă aici din cauza CHECK-ului XOR)
+  RAISE EXCEPTION 'Invalid purchase: neither neuron_id nor bundle_id set';
+END $$;
+
+DROP TRIGGER IF EXISTS user_purchases_mint_entitlements ON public.user_purchases;
+CREATE TRIGGER user_purchases_mint_entitlements
+AFTER INSERT ON public.user_purchases
+FOR EACH ROW EXECUTE FUNCTION trg_up_mint_entitlements();
+
+2) Contracte de business (executabile în schemă)
+
+XOR dur: cumperi ori un neuron, ori un bundle — niciodată ambele în același rând (ck_up_xor_single_or_bundle).
+
+Idempotency Stripe: stripe_payment_intent_id e unic (dacă e setat).
+
+Imutabilitate: user_id, neuron_id, bundle_id nu se modifică după insert (anti-fraud și anti-dublare entitlements).
+
+Minting automat: AFTER INSERT populează user_entitlements cu source = 'single' | 'bundle', ON CONFLICT DO NOTHING pentru siguranță.
+
+3) Teste rapide (copy/paste)
+-- presupune existența:
+--   INSERT INTO neurons(id,slug,title,summary,content_full,price_cents,category,tags)
+--   INSERT INTO bundles(id,slug,title,description,price_cents)
+--   INSERT INTO bundle_neurons(bundle_id, neuron_id)
+
+-- 1) One-off neuron
+INSERT INTO public.user_purchases(user_id, neuron_id, amount_cents, stripe_payment_intent_id)
+VALUES ('00000000-0000-0000-0000-000000000001',
+        '11111111-1111-1111-1111-111111111111',
+        2900, 'pi_test_single_001');
+
+-- entitlement a apărut?
+SELECT * FROM public.user_entitlements
+ WHERE user_id='00000000-0000-0000-0000-000000000001';
+
+-- 2) Bundle purchase
+INSERT INTO public.user_purchases(user_id, bundle_id, amount_cents, stripe_payment_intent_id)
+VALUES ('00000000-0000-0000-0000-000000000001',
+        '22222222-2222-2222-2222-222222222222',
+        11900, 'pi_test_bundle_001');
+
+-- toate entitlements pentru neuroni din bundle
+SELECT ue.*
+FROM public.user_entitlements ue
+JOIN public.bundle_neurons bn ON bn.neuron_id = ue.neuron_id
+WHERE ue.user_id='00000000-0000-0000-0000-000000000001'
+  AND bn.bundle_id='22222222-2222-2222-2222-222222222222';
+
+-- 3) Idempotency: re-livrarea webhookului cu același payment_intent → respinsă
+INSERT INTO public.user_purchases(user_id, neuron_id, amount_cents, stripe_payment_intent_id)
+VALUES ('00000000-0000-0000-0000-000000000001',
+        '11111111-1111-1111-1111-111111111111',
+        2900, 'pi_test_single_001');  -- ERROR: duplicate key on ux_user_purchases_payment_intent
+
+4) Integrare webhook Stripe (flux minimal corect)
+
+Primești payment_intent.succeeded sau checkout.session.completed.
+
+În tranzacție:
+
+inserezi în user_purchases cu stripe_payment_intent_id (reușește o singură dată datorită UNIQUE).
+
+triggerul mapează automat accesul în user_entitlements.
+
+Returnezi 200 OK indiferent dacă a fost „duplicate” (idempotency garantat).
+
+Verdict: validează banii la intrare, mintuiește accesul la ieșire, fără spațiu pentru „fantome”.
+
+
+
+
+
+user_entitlements — acces materializat + funcție de decizie (FULL OR)
+1) Migrare SQL — schemă, indici, imutabilitate
+-- 07_user_entitlements.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- sursa accesului (mai sigur ca ENUM decât text liber)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'entitlement_source') THEN
+    CREATE TYPE entitlement_source AS ENUM ('subscription','bundle','single');
+  END IF;
+END $$;
+
+-- tabel: user_entitlements
+CREATE TABLE IF NOT EXISTS public.user_entitlements (
+  user_id    uuid                NOT NULL REFERENCES auth.users (id) ON DELETE CASCADE,
+  neuron_id  uuid                NOT NULL REFERENCES public.neurons (id) ON DELETE CASCADE,
+  source     entitlement_source  NOT NULL,
+  granted_at timestamptz         NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, neuron_id)
+);
+
+-- indici utili pentru rapoarte inverse (cine are acces la X)
+CREATE INDEX IF NOT EXISTS idx_ue_neuron ON public.user_entitlements(neuron_id);
+CREATE INDEX IF NOT EXISTS idx_ue_source ON public.user_entitlements(source);
+
+-- interzice schimbarea cheilor după insert (anti-fraud)
+CREATE OR REPLACE FUNCTION trg_ue_immutable_keys()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.user_id <> OLD.user_id OR NEW.neuron_id <> OLD.neuron_id THEN
+      RAISE EXCEPTION 'user_id / neuron_id are immutable';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS ue_immutable_keys ON public.user_entitlements;
+CREATE TRIGGER ue_immutable_keys
+BEFORE UPDATE ON public.user_entitlements
+FOR EACH ROW EXECUTE FUNCTION trg_ue_immutable_keys();
+
+2) Funcții operaționale — plan activ + decizie acces FULL
+-- plan activ (unul singur, cf. indexului unic pe 'active')
+CREATE OR REPLACE FUNCTION public.f_user_active_plan(p_user uuid)
+RETURNS plan_tier
+LANGUAGE sql STABLE AS $$
+  SELECT us.plan
+  FROM public.user_subscriptions us
+  WHERE us.user_id = p_user
+    AND us.status = 'active'
+    AND (us.current_period_start IS NULL OR us.current_period_start <= now())
+    AND (us.current_period_end   IS NULL OR us.current_period_end   >  now())
+  ORDER BY us.current_period_end DESC NULLS LAST
+  LIMIT 1
+$$;
+
+-- decizie de acces FULL (OR):
+-- 1) există entitlement (single/bundle/subscription materializat)
+-- 2) plan = 'elite'
+-- 3) plan ∈ {'architect','initiate'} ȘI neuronul e în tier_access_pool pentru acel plan
+CREATE OR REPLACE FUNCTION public.f_has_full_access(p_user uuid, p_neuron uuid)
+RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  WITH ap AS (
+    SELECT public.f_user_active_plan(p_user) AS plan
+  )
+  SELECT
+    -- 1) entitlement materializat
+    EXISTS (
+      SELECT 1
+      FROM public.user_entitlements ue
+      WHERE ue.user_id = p_user AND ue.neuron_id = p_neuron
+    )
+    OR
+    -- 2) elite
+    EXISTS (
+      SELECT 1 FROM ap WHERE plan = 'elite'
+    )
+    OR
+    -- 3) architect/initiate + neuron în pool pentru planul respectiv
+    EXISTS (
+      SELECT 1
+      FROM ap
+      JOIN public.tier_access_pool tap
+        ON tap.neuron_id = p_neuron
+       AND tap.tier = ap.plan
+      WHERE ap.plan IN ('architect','initiate')
+    )
+$$;
+
+-- (opțional, pentru Supabase RPC bazat pe auth.uid())
+CREATE OR REPLACE FUNCTION public.f_has_full_access_current_user(p_neuron uuid)
+RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT public.f_has_full_access(auth.uid(), p_neuron)
+$$;
+
+
+Notă: dacă vrei ca planul free să aibă FULL pentru 10% pool, extinde condiția la ap.plan IN ('free','architect','initiate').
+
+3) Teste rapide (copy/paste)
+-- Premise minime:
+--   • user_subscriptions: un rând activ pentru user-ul X (elite / architect / initiate)
+--   • tier_access_pool: conține neuronul N pentru tier-urile potrivite
+--   • user_entitlements: poate fi gol pentru testele de subs
+
+-- A) Elite → TRUE fără entitlements
+SELECT public.f_has_full_access('00000000-0000-0000-0000-000000000001',
+                                '11111111-1111-1111-1111-111111111111');
+
+-- B) Architect + neuron în pool(architect) → TRUE
+-- (asigură INSERT în tier_access_pool(neuron_id=N, tier='architect'))
+SELECT public.f_has_full_access('00000000-0000-0000-0000-000000000002',
+                                '11111111-1111-1111-1111-111111111111');
+
+-- C) Initiate + neuron NU este în pool(initiate) → FALSE (dacă nu există entitlement)
+SELECT public.f_has_full_access('00000000-0000-0000-0000-000000000003',
+                                '11111111-1111-1111-1111-111111111111');
+
+-- D) Entitlement direct (single/bundle) → TRUE indiferent de plan
+INSERT INTO public.user_entitlements(user_id, neuron_id, source)
+VALUES ('00000000-0000-0000-0000-000000000004','11111111-1111-1111-1111-111111111111','single')
+ON CONFLICT DO NOTHING;
+
+SELECT public.f_has_full_access('00000000-0000-0000-0000-000000000004',
+                                '11111111-1111-1111-1111-111111111111');
+
+4) Integrare recomandată (livrare conținut)
+
+Expune summary din view public.
+
+Servește content_full doar prin RPC care verifică f_has_full_access(auth.uid(), neuron_id).
+
+Loghează accesul în user_analytics în aceeași tranzacție.
+
+Verdict: materializează drepturile reale și decuplează-le de aleatoriu; accesul devine o funcție, nu o speranță.
+
+
+
+
+
+tier_access_pool — pool procentual, determinist 24h, cu evergreen și scor compozit
+1) DDL — tabel + indici + garduri
+-- 08_tier_access_pool.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS ltree;            -- deja folosit la library_tree (nu strică)
+
+-- ENUM plan_tier trebuie să existe: ('free','architect','initiate','elite')
+
+CREATE TABLE IF NOT EXISTS public.tier_access_pool (
+  neuron_id   uuid      NOT NULL REFERENCES public.neurons(id) ON DELETE CASCADE,
+  tier        plan_tier NOT NULL,
+  score       numeric(5,4) NOT NULL DEFAULT 0 CHECK (score >= 0 AND score <= 1),
+  evergreen   boolean   NOT NULL DEFAULT false,       -- intră mereu în pool pentru Architect/Initiate
+  in_pool     boolean   NOT NULL DEFAULT false,       -- selecția curentă (valabilă 24h)
+  pool_date   date      NOT NULL DEFAULT CURRENT_DATE,
+  selected_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (neuron_id, tier)
+);
+
+-- interogări rapide pentru livrare
+CREATE INDEX IF NOT EXISTS idx_tap_tier_inpool  ON public.tier_access_pool(tier, in_pool);
+CREATE INDEX IF NOT EXISTS idx_tap_neuron       ON public.tier_access_pool(neuron_id);
+CREATE INDEX IF NOT EXISTS idx_tap_pool_date    ON public.tier_access_pool(pool_date);
+CREATE INDEX IF NOT EXISTS idx_tap_tier_score   ON public.tier_access_pool(tier, score DESC);
+
+2) Determinism 24h — tie-breaker reproducibil pe zi
+-- hash determinist (0..1) per (neuron, tier, zi) – fără random()
+CREATE OR REPLACE FUNCTION public.f_day_hash01(p_neuron uuid, p_tier plan_tier, p_date date)
+RETURNS numeric LANGUAGE sql IMMUTABLE AS $$
+  SELECT (('x'||substr(md5(p_neuron::text||p_tier::text||p_date::text),1,8))::bit(32)::int)::numeric
+         / 4294967295.0
+$$;
+
+3) Scor compozit (popularitate + noutate + scor manual)
+
+Popularitate: user_analytics (14 zile) — ln(1+views) + 2*ln(1+unlocks)
+
+Noutate: decădere liniară pe 90 zile (clamp 0..1)
+
+Manual: tier_access_pool.score (0..1) ca boost fin
+
+Blend: 0.4*pop + 0.4*novelty + 0.2*manual (clamp 0..1)
+
+4) Refresh pentru un tier — selectează EXACT 10/40/70%/100% (min. evergreen), 24h determinist
+CREATE OR REPLACE FUNCTION public.refresh_tier_access_pool_for_tier(p_tier plan_tier,
+                                                                    p_date date DEFAULT CURRENT_DATE)
+RETURNS TABLE(selected_count int, target_count int)  -- raport
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_percent int;
+  v_total_eligible int;
+  v_target int;
+  v_evergreens int;
+  v_cat_count int;
+  v_quota int;
+  v_selected int := 0;
+BEGIN
+  SELECT public.f_plan_percent_access(p_tier) INTO v_percent;
+
+  -- candidați eligibili: publicați și cu required_tier <= p_tier
+  WITH eligible AS (
+    SELECT n.id AS neuron_id, n.category, n.created_at,
+           COALESCE(tap.score, 0)::numeric AS manual_score,
+           COALESCE(tap.evergreen, false) AS evergreen
+    FROM public.neurons n
+    LEFT JOIN public.tier_access_pool tap
+      ON tap.neuron_id = n.id AND tap.tier = p_tier
+    WHERE n.published = TRUE
+      AND n.required_tier <= p_tier
+  ),
+  pop AS (
+    SELECT ua.neuron_id,
+           SUM(CASE WHEN ua.action='view'   AND ua.created_at > now() - interval '14 days' THEN 1 ELSE 0 END) AS v14,
+           SUM(CASE WHEN ua.action='unlock' AND ua.created_at > now() - interval '14 days' THEN 1 ELSE 0 END) AS u14
+    FROM public.user_analytics ua
+    GROUP BY ua.neuron_id
+  ),
+  scored AS (
+    SELECT e.neuron_id, e.category, e.created_at, e.evergreen, e.manual_score,
+           COALESCE(ln(1+pop.v14),0) + 2*COALESCE(ln(1+pop.u14),0) AS raw_pop
+    FROM eligible e
+    LEFT JOIN pop ON pop.neuron_id = e.neuron_id
+  ),
+  norm AS (
+    SELECT s.*,
+           CASE WHEN max(raw_pop) OVER() > 0 THEN s.raw_pop / max(raw_pop) OVER() ELSE 0 END AS pop_norm,
+           GREATEST(0, 1 - (EXTRACT(EPOCH FROM (now() - s.created_at)) / (86400*90))) AS novelty,
+           public.f_day_hash01(s.neuron_id, p_tier, p_date) AS tie
+    FROM scored s
+  ),
+  blended AS (
+    SELECT n.*, LEAST(1.0, GREATEST(0.0, 0.4*pop_norm + 0.4*novelty + 0.2*manual_score)) AS blended_score
+    FROM norm n
+  ),
+  counts AS (
+    SELECT COUNT(*) AS total_eligible,
+           COUNT(*) FILTER (WHERE evergreen) AS evergreen_count,
+           COUNT(DISTINCT category) AS cat_count
+    FROM blended
+  )
+  SELECT total_eligible, evergreen_count, cat_count
+  INTO v_total_eligible, v_evergreens, v_cat_count
+  FROM counts;
+
+  -- ținta = procent * eligibili, dar cel puțin numărul de evergreen (doar pentru Architect/Initiate)
+  v_target := CEIL(v_percent * v_total_eligible / 100.0);
+  IF p_tier IN ('architect','initiate') AND v_target < v_evergreens THEN
+    v_target := v_evergreens;
+  END IF;
+
+  -- curățare selecție curentă (doar flagul, nu ștergi scoruri/evergreen)
+  UPDATE public.tier_access_pool
+     SET in_pool = FALSE, pool_date = p_date
+   WHERE tier = p_tier AND in_pool = TRUE;
+
+  -- asigură existența rândurilor pentru toți eligibilii (upsert fără a reseta score/evergreen)
+  INSERT INTO public.tier_access_pool(neuron_id, tier, score, evergreen, in_pool, pool_date, selected_at)
+  SELECT b.neuron_id, p_tier, 0, b.evergreen, FALSE, p_date, now()
+  FROM blended b
+  ON CONFLICT (neuron_id, tier) DO NOTHING;
+
+  -- 1) include toți evergreen (doar Architect/Initiate); pentru 'free' sau 'elite' nu forțăm
+  IF p_tier IN ('architect','initiate') THEN
+    UPDATE public.tier_access_pool tap
+       SET in_pool = TRUE, pool_date = p_date, selected_at = now()
+      FROM (SELECT neuron_id FROM blended WHERE evergreen) s
+     WHERE tap.tier = p_tier AND tap.neuron_id = s.neuron_id;
+    GET DIAGNOSTICS v_selected = ROW_COUNT;
+  END IF;
+
+  -- 2) prim pas: diversitate pe categorii – maxim quota/categorie
+  v_quota := CEIL(v_target::numeric / GREATEST(v_cat_count, 1));
+
+  WITH ranked AS (
+    SELECT b.neuron_id, b.category, b.blended_score, b.tie,
+           ROW_NUMBER() OVER (PARTITION BY b.category ORDER BY b.blended_score DESC, b.tie ASC) AS rnk
+    FROM blended b
+    WHERE b.evergreen = FALSE
+  ),
+  winners AS (
+    SELECT neuron_id FROM ranked
+    WHERE rnk <= v_quota
+  )
+  UPDATE public.tier_access_pool tap
+     SET in_pool = TRUE, pool_date = p_date, selected_at = now()
+    WHERE tap.tier = p_tier
+      AND tap.in_pool = FALSE
+      AND tap.neuron_id IN (SELECT neuron_id FROM winners)
+      AND v_selected < v_target  -- protecție logică
+  ;
+  GET DIAGNOSTICS v_selected = v_selected + ROW_COUNT;
+
+  -- 3) umple restul locurilor după scor global (fără evergreen și fără câștigătorii primi)
+  IF v_selected < v_target THEN
+    WITH already AS (
+      SELECT neuron_id FROM public.tier_access_pool WHERE tier = p_tier AND in_pool = TRUE
+    ),
+    remaining AS (
+      SELECT b.neuron_id
+      FROM blended b
+      WHERE b.evergreen = FALSE
+        AND NOT EXISTS (SELECT 1 FROM already a WHERE a.neuron_id = b.neuron_id)
+      ORDER BY b.blended_score DESC, b.tie ASC
+      LIMIT (v_target - v_selected)
+    )
+    UPDATE public.tier_access_pool tap
+       SET in_pool = TRUE, pool_date = p_date, selected_at = now()
+      WHERE tap.tier = p_tier
+        AND tap.neuron_id IN (SELECT neuron_id FROM remaining);
+    GET DIAGNOSTICS v_selected = v_selected + ROW_COUNT;
+  END IF;
+
+  selected_count := v_selected;
+  target_count   := v_target;
+  RETURN NEXT;
+END
+$$;
+
+5) Refresh all — rulează pentru toate planurile
+CREATE OR REPLACE FUNCTION public.refresh_tier_access_pool_all(p_date date DEFAULT CURRENT_DATE)
+RETURNS TABLE(tier plan_tier, selected_count int, target_count int)
+LANGUAGE plpgsql AS $$
+DECLARE t plan_tier;
+        r record;
+BEGIN
+  FOR t IN SELECT unnest(enum_range(NULL::plan_tier)) LOOP
+    SELECT * INTO r FROM public.refresh_tier_access_pool_for_tier(t, p_date);
+    tier := t; selected_count := r.selected_count; target_count := r.target_count;
+    RETURN NEXT;
+  END LOOP;
+END $$;
+
+6) Cron zilnic (3:00, Europe/Chisinau) — selectează poolul pentru 24h
+-- necesită pg_cron în cluster (activ în majoritatea setup-urilor Supabase)
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+SELECT cron.schedule(
+  jobname  => 'refresh_tier_access_pool_daily',
+  schedule => 'TZ=Europe/Chisinau 0 3 * * *',
+  command  => $$CALL public.refresh_tier_access_pool_all(CURRENT_DATE);$$
+);
+
+7) View util pentru livrare
+CREATE OR REPLACE VIEW public.v_tier_pool_active AS
+SELECT tap.neuron_id, tap.tier, tap.score, tap.evergreen, tap.pool_date
+FROM public.tier_access_pool tap
+WHERE tap.in_pool = TRUE;
+
+8) Teste rapide (sanity)
+-- rulează refresh pe un tier
+SELECT * FROM public.refresh_tier_access_pool_for_tier('architect');
+
+-- verifică proporția
+WITH tot AS (SELECT COUNT(*) c FROM public.neurons n WHERE n.published AND n.required_tier <= 'architect')
+SELECT COUNT(*) AS in_pool,
+       (SELECT c FROM tot) AS eligible_total
+FROM public.v_tier_pool_active
+WHERE tier='architect';
+
+-- checkpoint: evergreen intră mereu pentru Architect/Initiate
+UPDATE public.tier_access_pool SET evergreen=TRUE WHERE tier='architect' LIMIT 5;
+SELECT * FROM public.refresh_tier_access_pool_for_tier('architect');
+
+9) Reguli cheie respectate
+
+Exact 10/40/70/100% per plan, cu evergreen prioritar pentru Architect/Initiate.
+
+Selecție deterministă 24h (hash pe zi), fără random().
+
+Diversitate pe categorii (cotă/categorie), apoi umplere globală după scor.
+
+Fără leak: doar neuroni published și cu required_tier ≤ tier.
+
+Idempotent: re-rularea în aceeași zi păstrează același pool.
+
+Verdict: din haosul librăriei faci ritm zilnic — selecție controlată, reproductibilă, comercială.
+
+
+
+
+
+
+neuron_content_versions — istoric imutabil, versiune atomică, reconstrucție la momentul achiziției
+1) DDL complet — tabel, indici, versiune auto, imutabilitate
+-- 09_neuron_content_versions.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- pentru digest()
+
+-- ── LOCK determinist per neuron (evită race la auto-versionare) ─────────────
+CREATE OR REPLACE FUNCTION public.f_uuid_lock_key(u uuid)
+RETURNS bigint
+LANGUAGE sql IMMUTABLE AS $$
+  -- extrage 64b din md5(uuid) ca bigint (negativ permis) pentru advisory locks
+  SELECT (('x'||substr(md5(u::text),1,16))::bit(64)::bigint)
+$$;
+
+CREATE OR REPLACE FUNCTION public.f_next_neuron_version(p_neuron uuid)
+RETURNS int
+LANGUAGE plpgsql
+AS $$
+DECLARE v int;
+BEGIN
+  -- lock pe durata tranzacției → două inserări concurente pe același neuron se serializează
+  PERFORM pg_advisory_xact_lock(public.f_uuid_lock_key(p_neuron));
+  SELECT COALESCE(MAX(version),0) + 1 INTO v
+  FROM public.neuron_content_versions
+  WHERE neuron_id = p_neuron;
+  RETURN v;
+END
+$$;
+
+-- ── TABELUL principal (append-only) ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.neuron_content_versions (
+  id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  neuron_id    uuid        NOT NULL REFERENCES public.neurons(id) ON DELETE CASCADE,
+  version      int         NOT NULL CHECK (version > 0),
+  content_full text        NOT NULL,
+  author       uuid        NULL REFERENCES auth.users(id),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+
+  -- UNIC pe (neuron, version)
+  UNIQUE (neuron_id, version)
+);
+
+-- ── Indici pentru interogări rapide ─────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_ncv_neuron_version  ON public.neuron_content_versions(neuron_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_ncv_neuron_created  ON public.neuron_content_versions(neuron_id, created_at DESC);
+
+-- ── BEFORE INSERT: setează version (dacă lipsește) și validează conținutul ─
+CREATE OR REPLACE FUNCTION public.trg_ncv_before_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.neuron_id IS NULL THEN
+    RAISE EXCEPTION 'neuron_id is required';
+  END IF;
+
+  IF NEW.version IS NULL OR NEW.version <= 0 THEN
+    NEW.version := public.f_next_neuron_version(NEW.neuron_id);
+  END IF;
+
+  IF NEW.content_full IS NULL OR length(NEW.content_full) = 0 THEN
+    RAISE EXCEPTION 'content_full is required (non-empty)';
+  END IF;
+
+  -- normalizare timestamp (în caz că vine setat explicit)
+  NEW.created_at := COALESCE(NEW.created_at, now());
+
+  RETURN NEW;
+END
+$$;
+
+DROP TRIGGER IF EXISTS ncv_before_insert ON public.neuron_content_versions;
+CREATE TRIGGER ncv_before_insert
+BEFORE INSERT ON public.neuron_content_versions
+FOR EACH ROW EXECUTE FUNCTION public.trg_ncv_before_insert();
+
+-- ── Imutabilitate: NU se fac UPDATE/DELETE (audit strict) ───────────────────
+CREATE OR REPLACE FUNCTION public.trg_ncv_block_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'neuron_content_versions is append-only; updates are not allowed';
+END $$;
+
+CREATE OR REPLACE FUNCTION public.trg_ncv_block_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'neuron_content_versions is append-only; deletes are not allowed';
+END $$;
+
+DROP TRIGGER IF EXISTS ncv_block_update ON public.neuron_content_versions;
+CREATE TRIGGER ncv_block_update
+BEFORE UPDATE ON public.neuron_content_versions
+FOR EACH ROW EXECUTE FUNCTION public.trg_ncv_block_update();
+
+DROP TRIGGER IF EXISTS ncv_block_delete ON public.neuron_content_versions;
+CREATE TRIGGER ncv_block_delete
+BEFORE DELETE ON public.neuron_content_versions
+FOR EACH ROW EXECUTE FUNCTION public.trg_ncv_block_delete();
+
+2) Helper functions — versiunea curentă / versiunea „la timp”
+-- ultima versiune disponibilă pentru un neuron
+CREATE OR REPLACE FUNCTION public.f_neuron_current_version(p_neuron uuid)
+RETURNS int
+LANGUAGE sql STABLE AS $$
+  SELECT MAX(version) FROM public.neuron_content_versions WHERE neuron_id = p_neuron
+$$;
+
+-- versiunea valabilă la un moment T (pentru reconstrucția legală)
+CREATE OR REPLACE FUNCTION public.f_neuron_version_at(p_neuron uuid, p_at timestamptz)
+RETURNS int
+LANGUAGE sql STABLE AS $$
+  SELECT version
+  FROM public.neuron_content_versions
+  WHERE neuron_id = p_neuron
+    AND created_at <= p_at
+  ORDER BY version DESC
+  LIMIT 1
+$$;
+
+-- content pentru o versiune anume (conveniență)
+CREATE OR REPLACE FUNCTION public.f_neuron_content_at(p_neuron uuid, p_at timestamptz)
+RETURNS text
+LANGUAGE sql STABLE AS $$
+  SELECT content_full
+  FROM public.neuron_content_versions
+  WHERE neuron_id = p_neuron
+    AND version = public.f_neuron_version_at(p_neuron, p_at)
+  LIMIT 1
+$$;
+
+3) API intern de creare — un singur punct de insert (opțional, dar recomandat)
+-- creează o versiune nouă; returnează (neuron_id, version, created_at)
+CREATE OR REPLACE FUNCTION public.f_create_neuron_version(
+  p_neuron  uuid,
+  p_content text,
+  p_author  uuid DEFAULT NULL
+)
+RETURNS TABLE(neuron_id uuid, version int, created_at timestamptz)
+LANGUAGE plpgsql
+AS $$
+DECLARE v int;
+BEGIN
+  v := public.f_next_neuron_version(p_neuron);
+  INSERT INTO public.neuron_content_versions(neuron_id, version, content_full, author)
+  VALUES (p_neuron, v, p_content, p_author);
+  RETURN QUERY
+    SELECT p_neuron, v, now();
+END
+$$;
+
+4) Reconstrucție la momentul achiziției (două opțiuni)
+A) Cu snapshot (dacă folosești purchase_receipts)
+
+La INSERT în user_purchases, creezi un rând în purchase_receipts cu:
+
+snapshot_version = public.f_neuron_version_at(neuron_id, created_at)
+
+snapshot_title/slug preluate din neurons la acel moment.
+
+Conținutul legal reprodus = versiunea snapshot_version.
+
+B) Fără snapshot (fallback)
+
+Folosești public.f_neuron_content_at(neuron_id, purchase.created_at) pentru a livra exact varianta validă la acel timestamp.
+
+Ambele sunt probabile în instanțe: (A) e mai sigur juridic; (B) e util de urgență dacă snapshotul lipsește.
+
+5) Teste minime (sanity, copi/paste)
+-- premisă: există un neuron X
+SELECT id AS neuron_id INTO TEMP TABLE t_neuron FROM public.neurons LIMIT 1;
+
+-- 1) Creează versiuni succesive (auto-increment, fără coliziuni)
+SELECT * FROM public.f_create_neuron_version((SELECT neuron_id FROM t_neuron), 'prima versiune', NULL);
+SELECT * FROM public.f_create_neuron_version((SELECT neuron_id FROM t_neuron), 'a doua versiune', NULL);
+
+-- 2) Ultima versiune
+SELECT public.f_neuron_current_version((SELECT neuron_id FROM t_neuron));
+
+-- 3) Versiunea la un timp din trecut
+SELECT public.f_neuron_version_at((SELECT neuron_id FROM t_neuron), now() - interval '1 minute');
+
+-- 4) Imutabilitate: încearcă UPDATE/DELETE → trebuie să arunce eroare
+UPDATE public.neuron_content_versions SET content_full = 'hack' LIMIT 1;   -- ERROR
+DELETE FROM public.neuron_content_versions WHERE TRUE;                     -- ERROR
+
+Verdict simbolic
+
+Fixează memoria ca lege: fiecare literă are versiune, iar versiunea devine probă.

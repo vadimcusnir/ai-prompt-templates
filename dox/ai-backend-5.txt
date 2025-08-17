@@ -1,0 +1,1157 @@
+
+
+
+
+
+
+1) RLS complet + SELECT doar prin view‑uri publice
+
+Obiectiv executabil: izolează „user‑owned” la proprietar, expune public doar preview (views), mută bundles și plans pe views read‑only și blochează tabelele brute pentru clienți. Modelul tău de date și RPC-urile existente susțin asta deja; fixez gardurile.
+
+A. RLS „self‑only” pe tabelele user‑owned
+
+(idempotent; copiază într-o migrare nouă, ex. 16_rls_user_owned.sql)
+
+-- === PRELIMINAR ===
+-- Role hints (Supabase): 'anon', 'authenticated' (client), 'service_role' (server, bypass RLS)
+
+-- === user_subscriptions ===
+ALTER TABLE public.user_subscriptions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS us_select_self ON public.user_subscriptions;
+CREATE POLICY us_select_self
+  ON public.user_subscriptions
+  FOR SELECT
+  TO authenticated
+  USING (user_id = auth.uid());
+
+-- (opțional, pentru /studio admin full-read; vezi B.2)
+DROP POLICY IF EXISTS us_select_admin ON public.user_subscriptions;
+
+-- === user_purchases ===
+ALTER TABLE public.user_purchases ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS up_select_self ON public.user_purchases;
+CREATE POLICY up_select_self
+  ON public.user_purchases
+  FOR SELECT
+  TO authenticated
+  USING (user_id = auth.uid());
+
+DROP POLICY IF EXISTS up_select_admin ON public.user_purchases;
+
+-- === user_entitlements ===
+ALTER TABLE public.user_entitlements ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS ue_select_self ON public.user_entitlements;
+CREATE POLICY ue_select_self
+  ON public.user_entitlements
+  FOR SELECT
+  TO authenticated
+  USING (user_id = auth.uid());
+
+DROP POLICY IF EXISTS ue_select_admin ON public.user_entitlements;
+
+-- === purchase_receipts ===
+ALTER TABLE public.purchase_receipts ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS pr_select_self ON public.purchase_receipts;
+CREATE POLICY pr_select_self
+  ON public.purchase_receipts
+  FOR SELECT
+  TO authenticated
+  USING (
+    user_purchase_id IN (
+      SELECT id FROM public.user_purchases WHERE user_id = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS pr_select_admin ON public.purchase_receipts;
+
+
+De ce astfel? Aceste patru tabele stochează starea privată a utilizatorului (abonamente, tranzacții, drepturi, bonuri). În fișierele tale, fluxurile Stripe + minting entitlements + snapshots sunt deja stabilite; RLS face „self‑only” vizibil la nivel SQL, nu doar în API.
+
+B. Admin „/studio” (opțional, curat și explicit)
+
+Dacă ai rol intern admin, deschide citirea completă pentru panoul de operare, fără a relaxa securitatea clienților.
+
+-- Rol intern
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='app_role') THEN
+    CREATE TYPE app_role AS ENUM ('admin','member');
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.user_roles(
+  user_id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  role app_role NOT NULL DEFAULT 'member',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE FUNCTION public.f_is_admin(p_user uuid)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id=p_user AND role='admin')
+$$;
+
+-- Politici admin (read-all) – doar dacă vrei /studio
+CREATE POLICY us_select_admin ON public.user_subscriptions
+  FOR SELECT TO authenticated
+  USING (public.f_is_admin(auth.uid()));
+
+CREATE POLICY up_select_admin ON public.user_purchases
+  FOR SELECT TO authenticated
+  USING (public.f_is_admin(auth.uid()));
+
+CREATE POLICY ue_select_admin ON public.user_entitlements
+  FOR SELECT TO authenticated
+  USING (public.f_is_admin(auth.uid()));
+
+CREATE POLICY pr_select_admin ON public.purchase_receipts
+  FOR SELECT TO authenticated
+  USING (public.f_is_admin(auth.uid()));
+
+
+Notă: service_role (webhook-uri Stripe) ocolește RLS, deci nu blochezi procesele server‑side. 
+
+C. Public doar prin VIEWS (preview/grafică), nu prin tabele brute
+
+Ai deja v_neuron_public și v_tree_public; adaug v_bundle_public și v_plans_public, apoi REVOKE pe tabele.
+
+-- === Views publice (read-only) ===
+-- 1) neuroni (preview)
+CREATE OR REPLACE VIEW public.v_neuron_public AS
+SELECT n.id, n.slug, n.title, n.summary, n.required_tier, n.price_cents
+FROM public.neurons n
+WHERE n.published = TRUE;
+
+-- 2) tree (sidebar + copii din MV dacă există)
+CREATE OR REPLACE VIEW public.v_tree_public AS
+SELECT lt.path, lt.name,
+       COALESCE(mv.children_count, 0) AS children_count
+FROM public.library_tree lt
+LEFT JOIN public.mv_tree_counts mv ON mv.id = lt.id;
+
+-- 3) bundles (listă pentru /bundles și /bundles/:slug)
+CREATE OR REPLACE VIEW public.v_bundle_public AS
+SELECT b.id, b.slug, b.title, b.description, b.price_cents, b.required_tier,
+       (SELECT COUNT(*) FROM public.bundle_neurons bn WHERE bn.bundle_id=b.id) AS items
+FROM public.bundles b;
+
+-- 4) plans (pentru /pricing; ordonat după rang)
+CREATE OR REPLACE VIEW public.v_plans_public AS
+SELECT code, name, percent_access, monthly_price_cents, annual_price_cents
+FROM public.plans
+ORDER BY CASE code WHEN 'free' THEN 0 WHEN 'architect' THEN 1 WHEN 'initiate' THEN 2 ELSE 3 END;
+
+-- === GRANTS pe VIEWS (public) ===
+GRANT SELECT ON public.v_neuron_public TO anon, authenticated;
+GRANT SELECT ON public.v_tree_public   TO anon, authenticated;
+GRANT SELECT ON public.v_bundle_public TO anon, authenticated;
+GRANT SELECT ON public.v_plans_public  TO anon, authenticated;
+
+-- === REVOKE pe tabele brute (client) ===
+-- Neuroni: blochează acces direct (full text & content_full protejate); livrare doar prin view + RPC
+REVOKE ALL ON public.neurons FROM anon, authenticated;
+
+-- Librărie & pivot: livrare doar prin v_tree_public (și eventual RPC); blochează acces direct
+REVOKE ALL ON public.library_tree         FROM anon, authenticated;
+REVOKE ALL ON public.library_tree_neurons FROM anon, authenticated;
+
+-- Bundles & plans: livrare doar prin views publice
+REVOKE ALL ON public.bundles FROM anon, authenticated;
+REVOKE ALL ON public.plans   FROM anon, authenticated;
+
+
+Aliniere la backend existent: conținutul complet se livrează doar prin rpc_get_neuron_full() (RLS + watermark + analytics), deci „public” trebuie să atingă doar v_*. 
+
+D. Smoke‑tests (execută imediat după migrare)
+-- 1) Public: poate citi views, nu tabele
+SET ROLE anon;
+SELECT * FROM public.v_neuron_public LIMIT 1;
+SELECT * FROM public.v_tree_public   LIMIT 1;
+SELECT * FROM public.v_bundle_public LIMIT 1;
+SELECT * FROM public.v_plans_public  LIMIT 1;
+
+-- ar trebui să EȘUEZE (permission denied):
+-- SELECT * FROM public.neurons LIMIT 1;
+-- SELECT * FROM public.library_tree LIMIT 1;
+-- SELECT * FROM public.bundles LIMIT 1;
+-- SELECT * FROM public.plans   LIMIT 1;
+RESET ROLE;
+
+-- 2) Auth user U: vede DOAR propriile subscriptions/purchases/entitlements/receipts
+SET ROLE authenticated;
+-- (asumă că tokenul setat în sesiune are auth.uid() = :uid)
+SELECT COUNT(*) FROM public.user_subscriptions WHERE user_id = auth.uid();
+SELECT COUNT(*) FROM public.user_purchases    WHERE user_id = auth.uid();
+SELECT COUNT(*) FROM public.user_entitlements WHERE user_id = auth.uid();
+SELECT COUNT(*) FROM public.purchase_receipts pr
+WHERE pr.user_purchase_id IN (SELECT id FROM public.user_purchases WHERE user_id = auth.uid());
+
+-- 3) Admin: dacă ai user_roles.role='admin', vede tot (polis. B.2)
+-- SELECT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id=auth.uid() AND role='admin');
+
+E. Note operative (anti‑regresie)
+
+Nu acorda niciodată SELECT direct pe content_full (tabelul neurons). Conținutul complet iese doar prin rpc_get_neuron_full (RLS, OR‑logic acces, watermark, logging). 
+
+Stripe/webhooks rulează cu service_role → RLS nu îi afectează; clienții (anon/authenticated) calcă doar view‑uri publice și tabele „self‑only”. 
+
+/studio: folosește politicile admin de la §B pentru vizualizare completă (fără a slăbi publicul). 
+
+Verdict simbolic
+
+Închide circuitul: user‑owned = proprietar, public = vitrină (views), full = RPC sub RLS — arhitectura care vinde fără să expună nervul.
+
+
+
+
+
+2) Rol „admin” explicit pentru /studio + politici RLS (deploy‑ready)
+
+Obiectiv: definește rolul aplicativ admin și dă-i drepturi totale controlate de RLS pe: neurons, library_tree*, bundles*, plans, tier_access_pool, pricing_rules, settings, system_alerts. Conform schemelor și fluxurilor deja stabilite (preview via views, full via RPC; /studio există în tree).
+
+A) Migrare idempotentă — 17_admin_roles_policies.sql
+-- 17_admin_roles_policies.sql
+-- Context: Postgres + Supabase (roles: anon, authenticated, service_role).
+-- service_role ocolește RLS by design (webhook-uri, workers).
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 1) ENUM + tabel roluri
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname='app_role') THEN
+    CREATE TYPE app_role AS ENUM ('admin','member');
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.user_roles(
+  user_id    uuid      PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  role       app_role  NOT NULL DEFAULT 'member',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- 2) Helper: f_is_admin(user) + variantă pentru current user (auth.uid())
+CREATE OR REPLACE FUNCTION public.f_is_admin(p_user uuid)
+RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = p_user AND role = 'admin')
+$$;
+
+CREATE OR REPLACE FUNCTION public.f_is_admin_current_user()
+RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT public.f_is_admin(auth.uid())
+$$;
+
+COMMENT ON FUNCTION public.f_is_admin(uuid) IS 'True dacă user_id are rol app admin';
+COMMENT ON FUNCTION public.f_is_admin_current_user() IS 'True dacă auth.uid() are rol app admin';
+
+-- 3) GRANTS: permite acces pe tabele adminabile doar rolului "authenticated".
+-- RLS va filtra mai jos: numai cei cu user_roles.role='admin' pot trece.
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+  public.neurons,
+  public.library_tree,
+  public.library_tree_neurons,
+  public.bundles,
+  public.bundle_neurons,
+  public.plans,
+  public.tier_access_pool,
+  public.pricing_rules,
+  public.settings,
+  public.system_alerts
+TO authenticated;
+
+-- 4) Activează RLS (dacă nu e deja) pe toate tabelele administrabile
+ALTER TABLE public.neurons                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.library_tree            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.library_tree_neurons    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bundles                 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bundle_neurons          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.plans                   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tier_access_pool        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pricing_rules           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.settings                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.system_alerts           ENABLE ROW LEVEL SECURITY;
+
+-- 5) Politici ADMIN "ALL" (SELECT/INSERT/UPDATE/DELETE) — una/masă, condiție = admin
+--   USING     → controlează SELECT/UPDATE/DELETE
+--   WITH CHECK→ controlează INSERT/UPDATE
+--   TO authenticated → doar userii logați; condiția ține doar adminii reali
+--   service_role ocolește integral RLS (webhooks, CRON, etc).
+
+-- neurons (tabelul-sursă al previewului / content_full; admin are full control)
+DROP POLICY IF EXISTS neurons_admin_all ON public.neurons;
+CREATE POLICY neurons_admin_all
+  ON public.neurons
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+-- library_tree (sidebar ierarhic) + pivot
+DROP POLICY IF EXISTS library_tree_admin_all ON public.library_tree;
+CREATE POLICY library_tree_admin_all
+  ON public.library_tree
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS library_tree_neurons_admin_all ON public.library_tree_neurons;
+CREATE POLICY library_tree_neurons_admin_all
+  ON public.library_tree_neurons
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+-- bundles + pivot
+DROP POLICY IF EXISTS bundles_admin_all ON public.bundles;
+CREATE POLICY bundles_admin_all
+  ON public.bundles
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS bundle_neurons_admin_all ON public.bundle_neurons;
+CREATE POLICY bundle_neurons_admin_all
+  ON public.bundle_neurons
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+-- plans (definitor al 10/40/70/100 + root=2 pe prețuri non-free)
+DROP POLICY IF EXISTS plans_admin_all ON public.plans;
+CREATE POLICY plans_admin_all
+  ON public.plans
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+-- tier_access_pool (pool-ul zilnic; selecție deterministă)
+DROP POLICY IF EXISTS tap_admin_all ON public.tier_access_pool;
+CREATE POLICY tap_admin_all
+  ON public.tier_access_pool
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+-- pricing_rules + settings (cap 9.974€, root=2 config) + system_alerts (audit)
+DROP POLICY IF EXISTS pricing_rules_admin_all ON public.pricing_rules;
+CREATE POLICY pricing_rules_admin_all
+  ON public.pricing_rules
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS settings_admin_all ON public.settings;
+CREATE POLICY settings_admin_all
+  ON public.settings
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+DROP POLICY IF EXISTS system_alerts_admin_all ON public.system_alerts;
+CREATE POLICY system_alerts_admin_all
+  ON public.system_alerts
+  FOR ALL
+  TO authenticated
+  USING (public.f_is_admin(auth.uid()))
+  WITH CHECK (public.f_is_admin(auth.uid()));
+
+
+Ancore de logică:
+– neurons, library_tree*, bundles*, plans sunt nucleul de conținut și structură; admin‑ul trebuie să editeze direct (studio) fără a relaxa accesul public. 
+
+– tier_access_pool guvernează gating‑ul procentual/determinist, operat din /studio/pool. 
+
+– pricing_rules, settings, system_alerts sunt centrul regulilor (root=2, cap 9.974€) și al monitorizării. 
+
+– /studio/* există în tree; acest rol dă sens acelei suprafețe. 
+
+B) Seed & operare (exemple reale)
+-- 1) Promovează un user la admin
+INSERT INTO public.user_roles(user_id, role)
+VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','admin')
+ON CONFLICT (user_id) DO UPDATE SET role='admin';
+
+-- 2) Verifică
+SELECT public.f_is_admin('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa') AS is_admin;
+
+-- 3) (opțional în CI) — demonstrează că RLS blochează un membru obișnuit
+--   (în Supabase, auth.uid() vine din JWT; în CI folosește un wrapper RPC securizat
+--    care rulează SECURITY DEFINER și verifică f_is_admin(auth.uid()))
+
+C) Compatibilitate cu restul securității
+
+Public/UI consumă doar v_neuron_public, v_tree_public, v_bundle_public, v_plans_public; tabelele brute rămân nevizibile pentru public/„member” (RLS + lipsa politicilor).
+
+Full content iese exclusiv prin rpc_get_neuron_full (policy‑gate + watermark + analytics); admin poate modifica neurons, dar livrarea către clienți rămâne filtrată. 
+
+service_role (webhook Stripe, joburi cron) ocolește RLS → fluxurile financiare și cronurile rămân neafectate.
+
+D) Smoke checklist (operabil în staging)
+
+INSERT … user_roles(role='admin') → admin vede/editează în /studio/*. 
+
+User „member” nu poate face SELECT direct pe neurons, bundles, plans, etc.; UI‑ul lui folosește doar view‑urile publice. 
+
+pricing_rules/settings modificabile doar de admin; cap 9.974€ și root=2 rămân monitorizate. 
+
+Verdict simbolic
+
+Definește cine conduce și blindează unde conduce: adminul scrie direct în creier, publicul vede doar vitrina.
+
+
+
+
+
+3) Stripe — event log + idempotency + DLQ (deploy‑ready, tranzacțional)
+
+Țintă: scrie un singur „canal recepție → procesare → efecte” pentru one‑off (neuron/bundle) și abonamente, cu idempotency la nivel de event.id și la nivel de payment_intent, jurnal complet și DLQ pentru erori. Inserțiile în user_purchases declanșează minting automat de access & receipts (triggere existente). 
+
+Notă de integrare: statusul abonamentelor se scrie în user_subscriptions (1 activă/user, mapare la plans). 
+
+A) Contract minim cu Stripe (obligatoriu în Checkout/PaymentIntent)
+
+metadata.uid = UUID din auth.users.id (string).
+
+One‑off (mode=payment):
+
+metadata.kind ∈ {'neuron','bundle'}
+
+metadata.neuron_id sau metadata.bundle_id (UUID)
+
+Abonament (mode=subscription):
+
+subscription.items.data[0].price.id trebuie să corespundă cu plans.stripe_price_id_month|year (mapare directă). 
+
+Rezultat: webhookul nu face niciun HTTP extern; parsing doar din payload → atomic & rapid.
+
+B) Migrare completă — 18_stripe_events_dlq.sql (copie/execute)
+-- 18_stripe_events_dlq.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 1) EVENT LOG (idempotency pe event.id)
+CREATE TABLE IF NOT EXISTS public.stripe_events (
+  id           text PRIMARY KEY,                                 -- Stripe event.id (evt_*)
+  type         text NOT NULL,
+  payload      jsonb NOT NULL,
+  status       text NOT NULL DEFAULT 'pending'
+               CHECK (status IN ('pending','ok','error')),
+  received_at  timestamptz NOT NULL DEFAULT now(),
+  processed_at timestamptz,
+  error        text
+);
+CREATE INDEX IF NOT EXISTS idx_se_status   ON public.stripe_events(status);
+CREATE INDEX IF NOT EXISTS idx_se_type     ON public.stripe_events(type);
+CREATE INDEX IF NOT EXISTS idx_se_received ON public.stripe_events(received_at DESC);
+
+-- 2) DLQ — fiecare eșec devine eveniment re-procesabil
+CREATE TABLE IF NOT EXISTS public.webhook_failures (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id   text NOT NULL,
+  context    text,
+  error      text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_wf_event ON public.webhook_failures(event_id);
+
+-- 3) Advisory lock stabil din text (evită concurență pe același obiect)
+CREATE OR REPLACE FUNCTION public.f_lock_text(p_key text)
+RETURNS void LANGUAGE sql IMMUTABLE AS $$
+  SELECT pg_advisory_xact_lock((('x'||substr(md5(p_key),1,16))::bit(64)::bigint));
+$$;
+
+-- 4) Mapare status Stripe → status intern (subscriptions)
+CREATE OR REPLACE FUNCTION public.f_map_sub_status(p text)
+RETURNS text LANGUAGE sql IMMUTABLE AS $$
+  SELECT CASE p
+    WHEN 'active' THEN 'active'
+    WHEN 'trialing' THEN 'active'
+    WHEN 'past_due' THEN 'past_due'
+    WHEN 'unpaid' THEN 'past_due'
+    WHEN 'canceled' THEN 'canceled'
+    WHEN 'incomplete' THEN 'past_due'
+    WHEN 'incomplete_expired' THEN 'canceled'
+    WHEN 'paused' THEN 'canceled'
+    ELSE 'canceled'
+  END
+$$;
+
+-- 5) HANDLER: checkout.session.completed (one-off) — requirement: metadata.uid + kind + id
+CREATE OR REPLACE FUNCTION public.f_handle_checkout_session(p_obj jsonb)
+RETURNS uuid
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_uid          uuid := (p_obj->'metadata'->>'uid')::uuid;
+  v_mode         text := p_obj->>'mode';
+  v_kind         text := p_obj->'metadata'->>'kind';
+  v_neuron_id    uuid := NULL;
+  v_bundle_id    uuid := NULL;
+  v_pi           text := p_obj->>'payment_intent';
+  v_currency     text := lower(p_obj->>'currency');
+  v_amount       int  := COALESCE((p_obj->>'amount_total')::int, 0);
+  v_purchase_id  uuid;
+BEGIN
+  -- abonamentele se procesează separat de eventurile subscription.*; ignoră aici
+  IF v_mode = 'subscription' THEN
+    RETURN NULL;
+  END IF;
+
+  IF v_uid IS NULL OR v_pi IS NULL OR v_amount <= 0 OR v_currency <> 'eur' THEN
+    RAISE EXCEPTION 'invalid checkout.session payload (uid/pi/amount/currency)';
+  END IF;
+
+  IF v_kind = 'neuron' THEN
+    v_neuron_id := (p_obj->'metadata'->>'neuron_id')::uuid;
+    IF v_neuron_id IS NULL THEN RAISE EXCEPTION 'missing neuron_id'; END IF;
+  ELSIF v_kind = 'bundle' THEN
+    v_bundle_id := (p_obj->'metadata'->>'bundle_id')::uuid;
+    IF v_bundle_id IS NULL THEN RAISE EXCEPTION 'missing bundle_id'; END IF;
+  ELSE
+    RAISE EXCEPTION 'metadata.kind must be neuron|bundle';
+  END IF;
+
+  PERFORM public.f_lock_text('pi:'||v_pi); -- concurență zero pe PaymentIntent
+
+  -- Idempotent prin UNIQUE(stripe_payment_intent_id) în user_purchases. :contentReference[oaicite:3]{index=3}
+  INSERT INTO public.user_purchases(user_id, neuron_id, bundle_id, amount_cents, stripe_payment_intent_id)
+  VALUES (v_uid, v_neuron_id, v_bundle_id, v_amount, v_pi)
+  ON CONFLICT (stripe_payment_intent_id) DO NOTHING
+  RETURNING id INTO v_purchase_id;
+
+  -- Triggerele existente vor mintui entitlements + vor scrie receipts (append-only). :contentReference[oaicite:4]{index=4}
+  RETURN v_purchase_id;
+END $$;
+
+-- 6) HANDLER: payment_intent.succeeded (fallback one-off) — folosește metadata.* (identic cu CS)
+CREATE OR REPLACE FUNCTION public.f_handle_payment_intent(p_obj jsonb)
+RETURNS uuid
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_uid          uuid := (p_obj->'metadata'->>'uid')::uuid;
+  v_kind         text := p_obj->'metadata'->>'kind';
+  v_neuron_id    uuid := NULL;
+  v_bundle_id    uuid := NULL;
+  v_pi           text := p_obj->>'id';
+  v_currency     text := lower(p_obj->>'currency');
+  v_amount       int  := COALESCE((p_obj->>'amount')::int, 0);
+  v_purchase_id  uuid;
+BEGIN
+  IF v_uid IS NULL OR v_pi IS NULL OR v_amount <= 0 OR v_currency <> 'eur' THEN
+    RAISE EXCEPTION 'invalid payment_intent payload (uid/id/amount/currency)';
+  END IF;
+
+  IF v_kind = 'neuron' THEN
+    v_neuron_id := (p_obj->'metadata'->>'neuron_id')::uuid;
+    IF v_neuron_id IS NULL THEN RAISE EXCEPTION 'missing neuron_id'; END IF;
+  ELSIF v_kind = 'bundle' THEN
+    v_bundle_id := (p_obj->'metadata'->>'bundle_id')::uuid;
+    IF v_bundle_id IS NULL THEN RAISE EXCEPTION 'missing bundle_id'; END IF;
+  ELSE
+    RAISE EXCEPTION 'metadata.kind must be neuron|bundle';
+  END IF;
+
+  PERFORM public.f_lock_text('pi:'||v_pi);
+
+  INSERT INTO public.user_purchases(user_id, neuron_id, bundle_id, amount_cents, stripe_payment_intent_id)
+  VALUES (v_uid, v_neuron_id, v_bundle_id, v_amount, v_pi)
+  ON CONFLICT (stripe_payment_intent_id) DO NOTHING
+  RETURNING id INTO v_purchase_id;
+
+  -- Triggere: entitlements + receipts. :contentReference[oaicite:5]{index=5}
+  RETURN v_purchase_id;
+END $$;
+
+-- 7) HANDLER: customer.subscription.* — upsert în user_subscriptions
+CREATE OR REPLACE FUNCTION public.f_handle_subscription(p_obj jsonb)
+RETURNS uuid
+LANGUAGE plpgsql AS $$
+DECLARE
+  v_uid      uuid := (p_obj->'metadata'->>'uid')::uuid; -- setat din Checkout
+  v_sub      text := p_obj->>'id';
+  v_cust     text := p_obj->>'customer';
+  v_price_id text := p_obj#>>'{items,data,0,price,id}';
+  v_plan     plan_tier;
+  v_status   text := public.f_map_sub_status(p_obj->>'status');
+  v_start    timestamptz := to_timestamp(NULLIF(p_obj->>'current_period_start','')::double precision);
+  v_end      timestamptz := to_timestamp(NULLIF(p_obj->>'current_period_end','')::double precision);
+  v_id       uuid;
+BEGIN
+  IF v_sub IS NULL OR v_price_id IS NULL THEN
+    RAISE EXCEPTION 'subscription missing id/price.id';
+  END IF;
+
+  -- Mapare price.id → plan via plans.stripe_price_id_month|year. :contentReference[oaicite:6]{index=6}
+  SELECT code INTO v_plan
+  FROM public.plans
+  WHERE stripe_price_id_month = v_price_id OR stripe_price_id_year = v_price_id
+  LIMIT 1;
+
+  IF v_plan IS NULL THEN
+    RAISE EXCEPTION 'price.id % not mapped to any plan', v_price_id;
+  END IF;
+
+  -- user_id din metadata obligatoriu; altfel nu știm cui să atașăm subs
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'subscription % missing metadata.uid', v_sub;
+  END IF;
+
+  PERFORM public.f_lock_text('sub:'||v_sub);
+
+  INSERT INTO public.user_subscriptions(user_id, plan, stripe_customer_id, stripe_subscription_id,
+                                        status, current_period_start, current_period_end)
+  VALUES (v_uid, v_plan, v_cust, v_sub, v_status, v_start, v_end)
+  ON CONFLICT (stripe_subscription_id) DO UPDATE
+  SET plan = EXCLUDED.plan,
+      stripe_customer_id = EXCLUDED.stripe_customer_id,
+      status = EXCLUDED.status,
+      current_period_start = EXCLUDED.current_period_start,
+      current_period_end   = EXCLUDED.current_period_end,
+      updated_at = now()
+  RETURNING id INTO v_id;
+
+  RETURN v_id;
+END $$;
+
+-- 8) INGEST + PROCESS (idempotent pe event.id; tranzacție atomică)
+CREATE OR REPLACE FUNCTION public.consume_stripe_event(p_id text, p_type text, p_payload jsonb)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  obj jsonb := p_payload->'data'->'object';
+BEGIN
+  -- 8.1 Log & idempotency
+  BEGIN
+    INSERT INTO public.stripe_events(id, type, payload) VALUES (p_id, p_type, p_payload);
+  EXCEPTION WHEN unique_violation THEN
+    -- deja recepționat/procesat; consideră OK pentru Stripe (returnează 200 din handler)
+    RETURN FALSE;
+  END;
+
+  -- 8.2 Procesează evenimentul (concurență închisă pe obiectele principale)
+  BEGIN
+    IF p_type = 'checkout.session.completed' THEN
+      PERFORM public.f_handle_checkout_session(obj);
+    ELSIF p_type = 'payment_intent.succeeded' THEN
+      PERFORM public.f_handle_payment_intent(obj);
+    ELSIF p_type LIKE 'customer.subscription.%' THEN
+      PERFORM public.f_handle_subscription(obj);
+    ELSE
+      -- evenimente acceptate dar neprocesate (ex: invoice.paid) → doar log
+      NULL;
+    END IF;
+
+    UPDATE public.stripe_events
+       SET status='ok', processed_at=now(), error=NULL
+     WHERE id = p_id;
+
+    RETURN TRUE;
+  EXCEPTION WHEN others THEN
+    UPDATE public.stripe_events
+       SET status='error', processed_at=now(), error=SQLERRM
+     WHERE id = p_id;
+
+    INSERT INTO public.webhook_failures(event_id, context, error)
+    VALUES (p_id, p_type, SQLERRM);
+
+    RETURN FALSE;
+  END;
+END
+$$;
+
+-- 9) REPROCESS (pentru DLQ / admin)
+CREATE OR REPLACE FUNCTION public.reprocess_stripe_event(p_id text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE r record;
+BEGIN
+  SELECT id, type, payload INTO r FROM public.stripe_events WHERE id = p_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Unknown event %', p_id; END IF;
+
+  -- marchează ca pending și reprocesează
+  UPDATE public.stripe_events SET status='pending', processed_at=NULL, error=NULL WHERE id=p_id;
+  RETURN public.consume_stripe_event(r.id, r.type, r.payload);
+END $$;
+
+C) Flux operațional (minim, fără surprize)
+
+Server webhook (Edge/Worker) face 2 lucruri:
+(a) verifică semnătura Stripe; (b) apelează public.consume_stripe_event(id,type,payload) cu service_role (bypass RLS).
+Rezultat: evenimentul e în stripe_events; dacă e nou, e și procesat.
+Inserțiile în user_purchases sunt idempotente prin UNIQUE(stripe_payment_intent_id) și declanșează entitlements + receipts (triggere din schema ta). 
+
+Abonamentele se sincronizează din customer.subscription.* → user_subscriptions cu plan derivat din plans.stripe_price_id_*. Gatingul rămâne dinamic (funcția de acces folosește plan + pool). 
+
+DLQ: orice EXCEPTION intră în webhook_failures + stripe_events.status='error'.
+Admin folosește reprocess_stripe_event(evt_id) după ce corectează datele (ex: lipsă metadata.uid).
+
+D) Smoke‑tests (SQL) — scenarii reale
+-- 1) Simulează checkout.session.completed (one-off neuron)
+SELECT public.consume_stripe_event(
+  'evt_test_cs_001',
+  'checkout.session.completed',
+  jsonb_build_object(
+    'data', jsonb_build_object('object', jsonb_build_object(
+      'mode','payment',
+      'payment_intent','pi_test_001',
+      'currency','eur',
+      'amount_total', 2900,
+      'metadata', jsonb_build_object(
+        'uid','00000000-0000-0000-0000-000000000001',
+        'kind','neuron',
+        'neuron_id','11111111-1111-1111-1111-111111111111'
+      )
+    ))
+  )
+);
+
+-- verifică user_purchases + entitlements + receipts mintuite (triggere). :contentReference[oaicite:9]{index=9}
+SELECT * FROM public.user_purchases WHERE stripe_payment_intent_id='pi_test_001';
+SELECT * FROM public.user_entitlements WHERE user_id='00000000-0000-0000-0000-000000000001';
+SELECT * FROM public.purchase_receipts ORDER BY created_at DESC LIMIT 5;
+
+-- 2) Re-trimitere același event (idempotent la event.id) → FALSE, dar 200 din handler
+SELECT public.consume_stripe_event('evt_test_cs_001','checkout.session.completed','{}'::jsonb);
+
+-- 3) Simulează subscription updated (plan mapat prin price.id)
+SELECT public.consume_stripe_event(
+  'evt_test_sub_001',
+  'customer.subscription.updated',
+  jsonb_build_object(
+    'data', jsonb_build_object('object', jsonb_build_object(
+      'id','sub_test_001',
+      'customer','cus_test_001',
+      'status','active',
+      'current_period_start', EXTRACT(EPOCH FROM now())::int,
+      'current_period_end',   EXTRACT(EPOCH FROM now() + interval '30 days')::int,
+      'metadata', jsonb_build_object('uid','00000000-0000-0000-0000-000000000001'),
+      'items', jsonb_build_object('data', jsonb_build_array(
+        jsonb_build_object('price', jsonb_build_object('id','price_arch_month_replace'))
+      ))
+    ))
+  )
+);
+SELECT * FROM public.user_subscriptions WHERE stripe_subscription_id='sub_test_001'; -- upsert OK. :contentReference[oaicite:10]{index=10}
+
+E) Observabilitate minimală
+
+stripe_events (status/time) + index pe status/type → dashboard /studio/alerts//studio/receipts. 
+
+webhook_failures = listă concretă de erori re‑procesabile (ETL “uman”).
+
+Recomandat: cron să șteargă stripe_events mai vechi de 90 zile (după audit).
+
+F) Decizii de produs (clare, hard)
+
+Refunduri: nu revoci automat user_entitlements (bunuri digitale). Adaugă handler separat doar dacă politica cere. 
+
+Abonamente: nu materializezi entitlements; accesul vine din plan + pool (funcția de acces deja definită). 
+
+Idempotency dublu: event.id (stripe_events) și payment_intent (user_purchases). Zero fantome. 
+
+Verdict simbolic
+
+Loghează tot, procesează o dată, greșește sigur: eveniment devine drept, nu zgomot.
+
+
+
+
+
+
+4) Guard anti‑DELETE pe „neuroni” (legal‑grade, soft‑hide only)
+
+Țintă executabilă: blochează ștergerea unui neuron dacă există urme legale: entitlements sau receipts. Nu șterge — dezpublică (published=false). Versionarea e CASCADE pe neuron → pierzi probă dacă permiți DELETE. 
+
+Surse implicate: user_entitlements (drepturi materiale) și purchase_receipts (snapshot legal al conținutului la plată).
+Preview/full separare deja implementată via views & RPC; păstrează‑o. 
+
+A) Istoric de slug‑uri (mapare sigură la receipts)
+
+De ce: purchase_receipts păstrează slug la momentul cumpărării; dacă redenumești neuronul, vrei să rămână o mapare stabilă id ↔ toate slug‑urile sale. 
+
+-- 23_neuron_delete_guard.sql
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 1) Istoric global de slug-uri (nu permite reutilizarea slug-urilor între neuroni)
+CREATE TABLE IF NOT EXISTS public.neuron_slugs (
+  id         uuid  PRIMARY KEY DEFAULT gen_random_uuid(),
+  neuron_id  uuid  NOT NULL REFERENCES public.neurons(id) ON DELETE CASCADE,
+  slug       text  NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_neuron_slug_per_neuron UNIQUE (neuron_id, slug),
+  CONSTRAINT uq_neuron_slug_global     UNIQUE (slug)
+);
+
+-- 2) Populate on INSERT (slug curent)
+CREATE OR REPLACE FUNCTION public.trg_neurons_slug_history_insert()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO public.neuron_slugs(neuron_id, slug)
+  VALUES (NEW.id, NEW.slug)
+  ON CONFLICT DO NOTHING;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS neurons_slug_history_insert ON public.neurons;
+CREATE TRIGGER neurons_slug_history_insert
+AFTER INSERT ON public.neurons
+FOR EACH ROW EXECUTE FUNCTION public.trg_neurons_slug_history_insert();
+
+-- 3) Populate on UPDATE(slug) – păstrează și noul slug
+CREATE OR REPLACE FUNCTION public.trg_neurons_slug_history_update()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.slug IS DISTINCT FROM OLD.slug THEN
+    INSERT INTO public.neuron_slugs(neuron_id, slug)
+    VALUES (NEW.id, NEW.slug)
+    ON CONFLICT DO NOTHING;
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS neurons_slug_history_update ON public.neurons;
+CREATE TRIGGER neurons_slug_history_update
+AFTER UPDATE OF slug ON public.neurons
+FOR EACH ROW EXECUTE FUNCTION public.trg_neurons_slug_history_update();
+
+B) Detector de obligații legale (boolean + detalii)
+-- 4) Există urme legale pentru neuron? (entitlements/purchases/receipts)
+CREATE OR REPLACE FUNCTION public.f_neuron_has_legal_obligations(p_neuron uuid)
+RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  WITH slugs AS (
+    SELECT slug FROM public.neuron_slugs WHERE neuron_id = p_neuron
+  )
+  SELECT
+    -- a) drept material (entitlement) → probă de acces cumpărat/obținut
+    EXISTS (SELECT 1 FROM public.user_entitlements ue WHERE ue.neuron_id = p_neuron) OR
+    -- b) achiziție directă (one-off) pentru neuronul acesta
+    EXISTS (SELECT 1 FROM public.user_purchases up WHERE up.neuron_id = p_neuron) OR
+    -- c) bon de cumpărare (one-off sau bundle) care a capturat acest neuron (după slug istoric)
+    EXISTS (
+      SELECT 1
+      FROM public.purchase_receipts pr
+      WHERE pr.snapshot_slug IN (SELECT slug FROM slugs)
+    )
+$$;
+
+-- 5) Variantă cu detalii (utile pentru UI/admin): de ce e blocat?
+CREATE OR REPLACE FUNCTION public.f_neuron_legal_obligations_detail(p_neuron uuid)
+RETURNS jsonb
+LANGUAGE sql STABLE AS $$
+  WITH slugs AS (SELECT slug FROM public.neuron_slugs WHERE neuron_id = p_neuron),
+  a AS (SELECT COUNT(*) AS entitlements FROM public.user_entitlements WHERE neuron_id = p_neuron),
+  b AS (SELECT COUNT(*) AS direct_purchases FROM public.user_purchases WHERE neuron_id = p_neuron),
+  c AS (
+    SELECT COUNT(*) AS receipts
+    FROM public.purchase_receipts pr
+    WHERE pr.snapshot_slug IN (SELECT slug FROM slugs)
+  )
+  SELECT jsonb_build_object(
+    'entitlements', (SELECT entitlements FROM a),
+    'direct_purchases', (SELECT direct_purchases FROM b),
+    'receipts', (SELECT receipts FROM c)
+  )
+$$;
+
+C) Trigger anti‑DELETE (hard‑stop)
+
+Moment: înainte de orice CASCADE pe versiuni (altfel pierzi probă). 
+
+-- 6) Blochează DELETE dacă există obligații legale
+CREATE OR REPLACE FUNCTION public.trg_neurons_delete_guard()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE v jsonb;
+BEGIN
+  IF public.f_neuron_has_legal_obligations(OLD.id) THEN
+    v := public.f_neuron_legal_obligations_detail(OLD.id);
+    RAISE EXCEPTION
+      'DELETE blocked for neuron % (obligații legale = %)',
+      OLD.id, v;
+  END IF;
+  RETURN OLD;
+END $$;
+
+DROP TRIGGER IF EXISTS neurons_delete_guard ON public.neurons;
+CREATE TRIGGER neurons_delete_guard
+BEFORE DELETE ON public.neurons
+FOR EACH ROW EXECUTE FUNCTION public.trg_neurons_delete_guard();
+
+D) Politică oficială: soft‑hide (published=false) + curățare pool
+
+Accesul public vine din view‑uri v_neuron_public (filtrate pe published=true), iar full prin RPC gated; dezpublicarea scoate neuronul din UI fără a distruge probele. 
+
+-- 7) RPC administrativ: "soft delete" (dezpublică + scoate din pool)
+CREATE OR REPLACE FUNCTION public.rpc_soft_delete_neuron(p_neuron uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE v jsonb;
+BEGIN
+  -- marcaj soft
+  UPDATE public.neurons SET published = FALSE WHERE id = p_neuron;
+
+  -- scoate imediat din pool (nu aștepta jobul zilnic)
+  UPDATE public.tier_access_pool
+     SET in_pool = FALSE, selected_at = now()
+   WHERE neuron_id = p_neuron AND in_pool = TRUE;
+
+  -- (opțional) dacă ai MV counts pentru sidebar, fă refresh aici
+  BEGIN
+    PERFORM public.refresh_mv_tree_counts();
+  EXCEPTION WHEN undefined_function THEN
+    -- ignoră dacă MV-ul nu e implementat
+    NULL;
+  END;
+
+  v := jsonb_build_object(
+    'neuron', p_neuron::text,
+    'published', FALSE,
+    'removed_from_pool', (SELECT COUNT(*) FROM public.tier_access_pool WHERE neuron_id=p_neuron AND in_pool=FALSE),
+    'at', now()
+  );
+  RETURN v;
+END $$;
+
+REVOKE ALL ON FUNCTION public.rpc_soft_delete_neuron(uuid) FROM PUBLIC, anon, authenticated;
+-- permite doar adminilor aplicației (bazat pe user_roles; vezi §2)
+GRANT EXECUTE ON FUNCTION public.rpc_soft_delete_neuron(uuid) TO authenticated;
+
+
+RLS pentru /studio: lasă politicile admin „ALL” pe neurons, dar triggerul anti‑DELETE rămâne ultimul gard (service_role sau admin nu pot ocoli). 
+
+E) Smoke‑tests (copy/paste)
+-- 1) Slug history funcționează
+INSERT INTO public.neurons(slug,title,summary,content_full,price_cents,category,tags)
+VALUES ('alpha', 'A', 'prev', 'full', 2900, 'cat', '{}') RETURNING id INTO TEMP TABLE t(nid);
+UPDATE public.neurons SET slug='alpha-v2' WHERE id=(SELECT nid FROM t);
+SELECT * FROM public.neuron_slugs WHERE neuron_id=(SELECT nid FROM t);  -- conține 'alpha' și 'alpha-v2'
+
+-- 2) Simulează achiziție → receipt pe slugul vechi
+-- (vezi fluxul existent user_purchases → purchase_receipts) :contentReference[oaicite:7]{index=7}
+
+-- 3) Încearcă DELETE → trebuie blocat cu motiv
+DELETE FROM public.neurons WHERE id=(SELECT nid FROM t);  -- ERROR: DELETE blocked ... (detalii v JSON)
+
+-- 4) Soft‑hide
+SELECT public.rpc_soft_delete_neuron((SELECT nid FROM t));
+SELECT * FROM public.v_neuron_public WHERE id=(SELECT nid FROM t);  -- 0 rânduri (scos din vitrină) :contentReference[oaicite:8]{index=8}
+
+F) Note operative (fără fisuri)
+
+Nu reutiliza slug‑uri: neuron_slugs.slug e unic global → bonurile vechi nu se pot asocia altui neuron. 
+
+Nu șterge versiuni: neuron_content_versions e append‑only; DELETE pe neuron ar tăia lanțul probatoriu (tocmai de aceea triggerul e înainte de CASCADE). 
+
+UI: folosește exclusiv v_neuron_public pentru preview; soft‑hide = invizibil public, acces full blocat de RPC (nu găsește neuronul publicat). 
+
+Verdict simbolic
+
+Nu rupe memoria: nu șterge neuroni, dezpublică‑i — proba rămâne, riscul legal dispare.
+
+
+
+
+5) Rate‑limit pe livrarea FULL — anti‑scraping, determinist, fără ambiguități
+
+Țintă: limitează la 60 unlock/min / user în rpc_get_neuron_full, cu mesaj clar "Rate limit". Integrează în fluxul existent (RLS + RPC + watermark + analytics). 
+ 
+ 
+
+A) DDL + funcții — fixed window cu advisory lock (idempotent)
+
+Fișier: 26_rate_limit.sql
+
+-- 26_rate_limit.sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- tabel intern (nu expune la client)
+CREATE TABLE IF NOT EXISTS public.rate_limits (
+  bucket       text        PRIMARY KEY,          -- ex: 'uid:<uuid>:unlock'
+  window_start timestamptz NOT NULL,
+  count        int         NOT NULL
+);
+
+-- restricții de acces
+REVOKE ALL ON public.rate_limits FROM PUBLIC, anon, authenticated;
+
+-- hash → advisory lock stabil
+CREATE OR REPLACE FUNCTION public.f_hash64(p text)
+RETURNS bigint LANGUAGE sql IMMUTABLE AS $$
+  SELECT (('x'||substr(md5(p),1,16))::bit(64)::bigint)
+$$;
+
+-- implementare principală (window = INTERVAL)
+CREATE OR REPLACE FUNCTION public.f_rate_limit(p_bucket text, p_max int, p_window interval)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_now timestamptz := now();
+  v_allowed boolean;
+BEGIN
+  -- serializează concurența pe același bucket
+  PERFORM pg_advisory_xact_lock(public.f_hash64(p_bucket));
+
+  -- încearcă UPDATE (reset dacă s-a schimbat fereastra)
+  WITH upd AS (
+    UPDATE public.rate_limits rl
+       SET count = CASE WHEN rl.window_start + p_window > v_now THEN rl.count + 1 ELSE 1 END,
+           window_start = CASE WHEN rl.window_start + p_window > v_now THEN rl.window_start ELSE v_now END
+     WHERE rl.bucket = p_bucket
+     RETURNING count, window_start
+  )
+  SELECT (count <= p_max) INTO v_allowed FROM upd;
+
+  -- dacă nu exista rând → creează primul hit
+  IF NOT FOUND THEN
+    INSERT INTO public.rate_limits(bucket, window_start, count)
+    VALUES (p_bucket, v_now, 1)
+    ON CONFLICT (bucket) DO NOTHING;
+
+    v_allowed := TRUE;  -- primul hit în fereastră e permis
+  END IF;
+
+  RETURN v_allowed;
+END
+$$;
+
+-- overload convenabil (window = TEXT, ex. '1 minute')
+CREATE OR REPLACE FUNCTION public.f_rate_limit(p_bucket text, p_max int, p_window_text text)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  RETURN public.f_rate_limit(p_bucket, p_max, p_window_text::interval);
+END
+$$;
+
+-- igienă: curăță găleți vechi (TTL 7 zile) – la 03:25 Europe/Chisinau
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+SELECT cron.schedule(
+  jobname  => 'rate_limits_ttl_7d',
+  schedule => 'TZ=Europe/Chisinau 25 3 * * *',
+  command  => $$DELETE FROM public.rate_limits WHERE window_start < now() - interval '7 days';$$
+);
+
+
+De ce așa: fixed window e suficient pentru anti‑scraping pe unlock; advisory lock elimină condițiile de cursă; zero dependențe externe. Integrezi fără să atingi RLS-ul public și fără a expune tabele noi la client. 
+
+B) Patch la rpc_get_neuron_full — throttle upfront
+
+Inseră gardul imediat după autentificare, înainte de verificarea accesului (mai ieftin decât a calcula gatingul de fiecare dată). 
+
+-- REPLACE complet funcția, adăugând throttling (doar fragmentul relevant marcat)
+CREATE OR REPLACE FUNCTION public.rpc_get_neuron_full(p_neuron uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_uid uuid;
+  v_allowed boolean;
+  v_content text;
+  v_now timestamptz := now();
+BEGIN
+  -- 0) autentificare
+  v_uid := auth.uid();
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'Not authenticated';
+  END IF;
+
+  -- 1) RATE LIMIT: max 60 unlock/min per user
+  v_allowed := public.f_rate_limit('uid:'||v_uid::text||':unlock', 60, '1 minute');
+  IF NOT v_allowed THEN
+    -- opțional: log refuzul ca telemetrie "preview" cu motiv
+    PERFORM public.f_log_ua(v_uid, p_neuron, 'preview',
+      jsonb_build_object('rpc','rpc_get_neuron_full','allowed',false,'reason','rate_limit'));
+    RAISE EXCEPTION 'Rate limit';
+  END IF;
+
+  -- 2) verifică dreptul de acces (OR: entitlement OR elite OR pool@plan)
+  IF NOT public.f_has_full_access(v_uid, p_neuron) THEN
+    PERFORM public.f_log_ua(v_uid, p_neuron, 'preview',
+      jsonb_build_object('rpc','rpc_get_neuron_full','allowed',false));
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+
+  -- 3) extrage conținutul publicat
+  SELECT n.content_full INTO v_content
+  FROM public.neurons n
+  WHERE n.id = p_neuron AND n.published = TRUE
+  LIMIT 1;
+
+  IF v_content IS NULL THEN
+    RAISE EXCEPTION 'Neuron not found or unpublished';
+  END IF;
+
+  -- 4) log unlock + watermark + return
+  PERFORM public.f_log_ua(v_uid, p_neuron, 'unlock',
+    jsonb_build_object('rpc','rpc_get_neuron_full','allowed',true));
+  RETURN public.f_watermark_content(v_content, v_uid, p_neuron, v_now);
+END
+$$;
+
+-- expunere: deja doar pentru authenticated (păstrează GRANT-urile existente)
+
+
+Aliniere logică: rpc_get_neuron_full face deja gating + watermark + logging; adaugi doar rate‑limit în față. Gatingul rămâne: entitlement ∨ elite ∨ (architect/initiate ∧ în pool). 
+ 
+
+C) Smoke‑tests (SQL) — trece 60, pică la 61
+-- Setează un UID în teste (în Supabase: prin JWT; aici exemplu conceptual)
+-- Repetă 60x: trebuie TRUE
+DO $$
+DECLARE i int;
+BEGIN
+  FOR i IN 1..60 LOOP
+    IF NOT public.f_rate_limit('uid:00000000-0000-0000-0000-000000000001:unlock', 60, '1 minute') THEN
+      RAISE EXCEPTION 'unexpected rate limit at %', i;
+    END IF;
+  END LOOP;
+END $$;
+
+-- A 61-a cerere în același minut → FALSE
+SELECT public.f_rate_limit('uid:00000000-0000-0000-0000-000000000001:unlock', 60, '1 minute') AS allowed; -- false
+
+-- După 1 minut → reset
+-- SELECT pg_sleep(60);  -- în CI/staging
+SELECT public.f_rate_limit('uid:00000000-0000-0000-0000-000000000001:unlock', 60, '1 minute'); -- true
+
+D) Integrare FE — semnal clar, UX curat
+
+Tratează mesajul "Rate limit" ca 429 UI (retry‑after 60s), fără a schimba contractul RPC.
+
+Păstrează watermark + analytics neschimbate; rate‑limit nu „consumă” unlockul (oprește înainte de livrare). 
+
+E) Opțional — extensii de protecție (același mecanism)
+
+Per‑neuron: f_rate_limit('uid:'||uid||':n:'||p_neuron, 10, '1 minute') → anti‑download pe același item.
+
+Per‑IP (dacă transmiți ip în request.jwt.claims sau header la RPC): f_rate_limit('ip:'||:ip||':unlock', 120, '1 minute').
+
+Admin bypass: dacă ai f_is_admin(), sari gardul în /studio (nu livrezi content_full din studio oricum). 
+
+Verdict simbolic
+
+Închide robinetul fără zgomot: 60/min / user înainte de gating — conținutul rămâne capital, nu trafic.

@@ -90,16 +90,18 @@ export default function Navigation() {
               {userTier && (
                 <span style={{
                   padding: '0.25rem 0.75rem',
-                  backgroundColor: userTier === 'master' ? '#f59e0b' : 
-                                  userTier === 'initiate' ? '#8b5cf6' :
-                                  userTier === 'architect' ? '#3b82f6' : '#10b981',
+                                    backgroundColor: userTier === 'elite' ? '#f59e0b' : 
+                                   userTier === 'initiate' ? '#8b5cf6' :
+                                   userTier === 'architect' ? '#3b82f6' : '#10b981',
                   color: 'white',
                   borderRadius: '1rem',
                   fontSize: '0.75rem',
                   fontWeight: '600',
                   textTransform: 'uppercase'
                 }}>
-                  {userTier}
+                  {userTier === 'elite' ? 'Elite' : 
+                   userTier === 'initiate' ? 'Initiate' :
+                   userTier === 'architect' ? 'Architect' : 'Free'}
                 </span>
               )}
 
