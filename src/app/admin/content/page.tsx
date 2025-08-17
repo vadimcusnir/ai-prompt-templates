@@ -21,7 +21,7 @@ const Grid = ({ children, ...props }: any) => <div style={{ display: 'grid', ...
 const Badge = ({ children, ...props }: any) => (
   <span style={{ padding: '0.25rem 0.5rem', borderRadius: '0.25rem', fontSize: '0.75rem', backgroundColor: '#e5e7eb', ...props.style }} {...props}>{children}</span>
 );
-const Spinner = () => <div>Loading...</div>;
+const Spinner = ({ size, ...props }: any) => <div {...props}>Loading...</div>;
 import { createClientSideClient } from '@/lib/supabase';
 
 // Supabase client
