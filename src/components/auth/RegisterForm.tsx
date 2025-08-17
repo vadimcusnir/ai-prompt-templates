@@ -2,13 +2,13 @@
 
 import { useState } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
+import ProtectedRoute from '@/components/ProtectedRoute'
 
 interface RegisterFormProps {
-  onSuccess?: () => void
   onToggleMode?: () => void
 }
 
-export function RegisterForm({ onSuccess, onToggleMode }: RegisterFormProps) {
+export function RegisterForm({ onToggleMode }: RegisterFormProps) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')

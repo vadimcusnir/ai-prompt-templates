@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { logError } from '@/lib/logger';
 
 interface Prompt {
   id: string;
@@ -13,6 +15,7 @@ interface Prompt {
 }
 
 export default function HomePage() {
+  const router = useRouter();
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [loading, setLoading] = useState(true);
   
@@ -26,7 +29,9 @@ export default function HomePage() {
       const data = await response.json();
       setPrompts(data.prompts || []);
     } catch (error) {
-      console.error('Failed to fetch prompts:', error);
+      logError('Failed to fetch prompts', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
     } finally {
       setLoading(false);
     }
@@ -75,30 +80,36 @@ export default function HomePage() {
         </p>
         
         <div style={{ marginBottom: '3rem' }}>
-          <button style={{
-            backgroundColor: '#3b82f6',
-            color: 'white',
-            padding: '1rem 2rem',
-            fontSize: '1.1rem',
-            border: 'none',
-            borderRadius: '0.5rem',
-            cursor: 'pointer',
-            marginRight: '1rem',
-            transition: 'all 0.2s'
-          }}>
+          <button 
+            onClick={() => router.push('/library')}
+            style={{
+              backgroundColor: '#3b82f6',
+              color: 'white',
+              padding: '1rem 2rem',
+              fontSize: '1.1rem',
+              border: 'none',
+              borderRadius: '0.5rem',
+              cursor: 'pointer',
+              marginRight: '1rem',
+              transition: 'all 0.2s'
+            }}
+          >
             Explore Cognitive Library
           </button>
           
-          <button style={{
-            backgroundColor: 'transparent',
-            color: '#3b82f6',
-            padding: '1rem 2rem',
-            fontSize: '1.1rem',
-            border: '2px solid #3b82f6',
-            borderRadius: '0.5rem',
-            cursor: 'pointer',
-            transition: 'all 0.2s'
-          }}>
+          <button 
+            onClick={() => router.push('/pricing')}
+            style={{
+              backgroundColor: 'transparent',
+              color: '#3b82f6',
+              padding: '1rem 2rem',
+              fontSize: '1.1rem',
+              border: '2px solid #3b82f6',
+              borderRadius: '0.5rem',
+              cursor: 'pointer',
+              transition: 'all 0.2s'
+            }}
+          >
             View Pricing
           </button>
         </div>

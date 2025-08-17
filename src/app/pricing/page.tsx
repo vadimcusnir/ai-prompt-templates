@@ -1,8 +1,9 @@
-'use client';
+'use client'
 
-import { useState } from 'react';
-import { useAuth } from '@/contexts/AuthContext';
-import { useRouter } from 'next/navigation';
+import { useState } from 'react'
+import { useAuth } from '@/contexts/AuthContext'
+import { useRouter } from 'next/navigation'
+import ProtectedRoute from '@/components/ProtectedRoute'
 import { 
   TIER_PRICES, 
   TIER_NAMES, 
@@ -10,24 +11,28 @@ import {
   TIER_FEATURES,
   formatPrice,
   type UserTier 
-} from '@/lib/stripe';
+} from '@/lib/stripe'
 
 export default function PricingPage() {
-  const { user, userTier } = useAuth();
-  const router = useRouter();
-  const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const { user, userTier, loading } = useAuth()
+  const [selectedTier, setSelectedTier] = useState<UserTier | null>(null)
+  const [checkoutLoading, setCheckoutLoading] = useState(false)
+  const [error, setError] = useState('')
+  const router = useRouter()
 
   const handleUpgrade = async (tier: UserTier) => {
     if (!user) {
-      router.push('/auth');
-      return;
+      router.push('/auth')
+      return
     }
 
-    if (userTier === tier) {
-      return; // Already has this tier
+    if (tier === userTier) {
+      return // Already at this tier
     }
 
-    setLoading(prev => ({ ...prev, [tier]: true }));
+    setSelectedTier(tier)
+    setCheckoutLoading(true)
+    setError('')
 
     try {
       const response = await fetch('/api/stripe/create-checkout-session', {
@@ -39,266 +44,351 @@ export default function PricingPage() {
           tier,
           userId: user.id,
         }),
-      });
+      })
 
-      const { url, sessionId } = await response.json();
+      const data = await response.json()
 
-      if (url) {
-        window.location.href = url;
+      if (data.error) {
+        setError(data.error)
+      } else if (data.url) {
+        // Redirect to Stripe Checkout
+        window.location.href = data.url
       } else {
-        throw new Error('No checkout URL received');
+        setError('Failed to create checkout session')
       }
-    } catch (error) {
-      console.error('Checkout error:', error);
-      alert('Failed to create checkout session. Please try again.');
+    } catch (err) {
+      setError('An error occurred while processing your request')
     } finally {
-      setLoading(prev => ({ ...prev, [tier]: false }));
+      setCheckoutLoading(false)
     }
-  };
+  }
 
-  const isCurrentTier = (tier: UserTier) => userTier === tier;
+  const getTierColor = (tier: UserTier) => {
+    switch (tier) {
+      case 'explorer': return '#10b981'
+      case 'architect': return '#3b82f6'
+      case 'initiate': return '#8b5cf6'
+      case 'master': return '#f59e0b'
+      default: return '#6b7280'
+    }
+  }
 
-  const tiers: UserTier[] = ['explorer', 'architect', 'initiate', 'master'];
+  const isCurrentTier = (tier: UserTier) => tier === userTier
+  const isUpgradeable = (tier: UserTier) => {
+    const tierOrder: UserTier[] = ['explorer', 'architect', 'initiate', 'master']
+    const currentIndex = tierOrder.indexOf(userTier)
+    const targetIndex = tierOrder.indexOf(tier)
+    return targetIndex > currentIndex
+  }
 
   return (
-    <div style={{ padding: '40px 20px', maxWidth: '1200px', margin: '0 auto' }}>
-      {/* Header */}
-      <div style={{ textAlign: 'center', marginBottom: '60px' }}>
-        <h1 style={{ 
-          fontSize: '48px', 
-          fontWeight: 'bold', 
-          color: '#1a1a1a',
-          marginBottom: '20px',
-          lineHeight: '1.2'
-        }}>
-          Choose Your Cognitive Journey
-        </h1>
-        <p style={{ 
-          fontSize: '20px', 
-          color: '#666', 
-          maxWidth: '600px', 
-          margin: '0 auto' 
-        }}>
-          Unlock the power of AI-driven cognitive frameworks with our tiered access system.
-          Each tier follows our digital root 2 pricing algorithm.
-        </p>
-      </div>
-
-      {/* Current Tier Display */}
-      {user && (
-        <div style={{ 
-          textAlign: 'center', 
-          marginBottom: '40px', 
-          padding: '20px', 
-          backgroundColor: '#f8f9fa',
-          borderRadius: '12px',
-          border: '2px solid #e9ecef'
-        }}>
-          <h3 style={{ color: '#28a745', marginBottom: '8px' }}>
-            Your Current Tier: {TIER_NAMES[userTier] || 'Explorer'}
-          </h3>
-          <p style={{ color: '#666', margin: '0' }}>
-            {TIER_DESCRIPTIONS[userTier] || 'Essential cognitive frameworks for beginners'}
+    <div style={{ 
+      minHeight: '100vh', 
+      backgroundColor: '#f8fafc',
+      padding: '2rem'
+    }}>
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        {/* Header */}
+        <div style={{ textAlign: 'center', marginBottom: '3rem' }}>
+          <h1 style={{ 
+            fontSize: '3rem', 
+            fontWeight: 'bold', 
+            color: '#374151',
+            marginBottom: '1rem'
+          }}>
+            Choose Your Cognitive Journey
+          </h1>
+          <p style={{ 
+            fontSize: '1.25rem', 
+            color: '#6b7280',
+            maxWidth: '600px',
+            margin: '0 auto'
+          }}>
+            Unlock advanced AI frameworks designed for cognitive depth and meaning engineering
           </p>
         </div>
-      )}
 
-      {/* Pricing Cards */}
-      <div style={{ 
-        display: 'grid', 
-        gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
-        gap: '30px',
-        marginBottom: '60px'
-      }}>
-        {tiers.map((tier) => {
-          const price = TIER_PRICES[tier];
-          const name = TIER_NAMES[tier];
-          const description = TIER_DESCRIPTIONS[tier];
-          const features = TIER_FEATURES[tier];
-          const isCurrent = isCurrentTier(tier);
-          const isLoading = loading[tier];
-
-          return (
+        {/* Pricing Grid */}
+        <div style={{ 
+          display: 'grid', 
+          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', 
+          gap: '2rem',
+          marginBottom: '3rem'
+        }}>
+          {(['explorer', 'architect', 'initiate', 'master'] as UserTier[]).map((tier) => (
             <div
               key={tier}
               style={{
-                border: isCurrent ? '3px solid #28a745' : '2px solid #e9ecef',
-                borderRadius: '16px',
-                padding: '32px 24px',
-                backgroundColor: isCurrent ? '#f8f9fa' : '#ffffff',
+                backgroundColor: 'white',
+                borderRadius: '1rem',
+                padding: '2rem',
+                boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)',
+                border: isCurrentTier(tier) ? `3px solid ${getTierColor(tier)}` : '1px solid #e5e7eb',
                 position: 'relative',
-                boxShadow: tier === 'architect' ? '0 8px 30px rgba(0,0,0,0.12)' : '0 4px 20px rgba(0,0,0,0.08)',
-                transform: tier === 'architect' ? 'scale(1.05)' : 'scale(1)',
-                transition: 'all 0.3s ease'
+                transition: 'transform 0.2s, box-shadow 0.2s'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-4px)'
+                e.currentTarget.style.boxShadow = '0 8px 25px rgba(0, 0, 0, 0.15)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)'
+                e.currentTarget.style.boxShadow = '0 4px 6px rgba(0, 0, 0, 0.1)'
               }}
             >
-              {/* Popular Badge */}
-              {tier === 'architect' && (
+              {/* Current Tier Badge */}
+              {isCurrentTier(tier) && (
                 <div style={{
                   position: 'absolute',
                   top: '-12px',
                   left: '50%',
                   transform: 'translateX(-50%)',
-                  backgroundColor: '#ff6b35',
+                  backgroundColor: getTierColor(tier),
                   color: 'white',
-                  padding: '6px 20px',
-                  borderRadius: '20px',
-                  fontSize: '14px',
-                  fontWeight: '600'
+                  padding: '0.5rem 1rem',
+                  borderRadius: '2rem',
+                  fontSize: '0.875rem',
+                  fontWeight: '600',
+                  textTransform: 'uppercase'
                 }}>
-                  MOST POPULAR
+                  Current Plan
                 </div>
               )}
 
-              {/* Current Tier Badge */}
-              {isCurrent && (
-                <div style={{
-                  position: 'absolute',
-                  top: '-12px',
-                  right: '24px',
-                  backgroundColor: '#28a745',
-                  color: 'white',
-                  padding: '6px 16px',
-                  borderRadius: '20px',
-                  fontSize: '12px',
-                  fontWeight: '600'
-                }}>
-                  CURRENT
-                </div>
-              )}
-
-              <div style={{ textAlign: 'center', marginBottom: '24px' }}>
+              {/* Tier Header */}
+              <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
                 <h3 style={{ 
-                  fontSize: '24px', 
+                  fontSize: '1.5rem', 
                   fontWeight: 'bold', 
-                  color: '#1a1a1a',
-                  marginBottom: '8px'
+                  color: '#374151',
+                  marginBottom: '0.5rem'
                 }}>
-                  {name}
+                  {TIER_NAMES[tier]}
                 </h3>
                 <p style={{ 
-                  color: '#666', 
-                  fontSize: '16px',
-                  marginBottom: '16px'
+                  fontSize: '1rem', 
+                  color: '#6b7280',
+                  marginBottom: '1rem'
                 }}>
-                  {description}
+                  {TIER_DESCRIPTIONS[tier]}
                 </p>
-                <div style={{ marginBottom: '8px' }}>
-                  <span style={{ 
-                    fontSize: '36px', 
-                    fontWeight: 'bold', 
-                    color: '#1a1a1a' 
-                  }}>
-                    {formatPrice(price)}
-                  </span>
+                <div style={{ 
+                  fontSize: '3rem', 
+                  fontWeight: 'bold', 
+                  color: getTierColor(tier)
+                }}>
+                  {formatPrice(TIER_PRICES[tier])}
                 </div>
                 <p style={{ 
-                  fontSize: '14px', 
-                  color: '#888',
-                  margin: '0'
+                  fontSize: '0.875rem', 
+                  color: '#6b7280'
                 }}>
                   One-time payment
                 </p>
               </div>
 
               {/* Features */}
-              <ul style={{ 
-                listStyle: 'none', 
-                padding: '0', 
-                marginBottom: '32px' 
-              }}>
-                {features.map((feature, index) => (
-                  <li key={index} style={{ 
-                    display: 'flex', 
-                    alignItems: 'center',
-                    marginBottom: '12px',
-                    fontSize: '15px',
-                    color: '#444'
-                  }}>
-                    <span style={{ 
-                      color: '#28a745', 
-                      marginRight: '12px',
-                      fontSize: '18px'
-                    }}>
-                      ✓
-                    </span>
-                    {feature}
-                  </li>
-                ))}
-              </ul>
+              <div style={{ marginBottom: '2rem' }}>
+                <ul style={{ listStyle: 'none', padding: 0 }}>
+                  {TIER_FEATURES[tier].map((feature, index) => (
+                    <li
+                      key={index}
+                      style={{
+                        padding: '0.5rem 0',
+                        display: 'flex',
+                        alignItems: 'center',
+                        fontSize: '0.875rem',
+                        color: '#374151'
+                      }}
+                    >
+                      <span style={{ 
+                        color: getTierColor(tier), 
+                        marginRight: '0.5rem',
+                        fontSize: '1.25rem'
+                      }}>
+                        ✓
+                      </span>
+                      {feature}
+                    </li>
+                  ))}
+                </ul>
+              </div>
 
-              {/* CTA Button */}
+              {/* Action Button */}
               <button
                 onClick={() => handleUpgrade(tier)}
-                disabled={isCurrent || isLoading}
+                disabled={isCurrentTier(tier) || checkoutLoading}
                 style={{
                   width: '100%',
-                  padding: '16px 24px',
-                  fontSize: '16px',
-                  fontWeight: '600',
-                  borderRadius: '8px',
+                  padding: '1rem',
+                  backgroundColor: isCurrentTier(tier) 
+                    ? '#9ca3af' 
+                    : isUpgradeable(tier) 
+                      ? getTierColor(tier)
+                      : '#e5e7eb',
+                  color: isCurrentTier(tier) || !isUpgradeable(tier) ? '#6b7280' : 'white',
                   border: 'none',
-                  cursor: isCurrent ? 'not-allowed' : 'pointer',
-                  transition: 'all 0.3s ease',
-                  backgroundColor: isCurrent 
-                    ? '#e9ecef' 
-                    : (tier === 'architect' ? '#ff6b35' : '#007bff'),
-                  color: isCurrent ? '#6c757d' : 'white',
-                  opacity: isLoading ? 0.7 : 1
-                }}
-                onMouseOver={(e) => {
-                  if (!isCurrent && !isLoading) {
-                    e.currentTarget.style.transform = 'translateY(-2px)';
-                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-                  }
-                }}
-                onMouseOut={(e) => {
-                  if (!isCurrent && !isLoading) {
-                    e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = 'none';
-                  }
+                  borderRadius: '0.5rem',
+                  fontSize: '1rem',
+                  fontWeight: '600',
+                  cursor: isCurrentTier(tier) || !isUpgradeable(tier) ? 'not-allowed' : 'pointer',
+                  transition: 'background-color 0.2s'
                 }}
               >
-                {isLoading ? (
-                  'Processing...'
-                ) : isCurrent ? (
-                  'Current Plan'
-                ) : (
-                  `Upgrade to ${name}`
-                )}
+                {isCurrentTier(tier) 
+                  ? 'Current Plan' 
+                  : !isUpgradeable(tier) 
+                    ? 'Downgrade Not Available'
+                    : checkoutLoading && selectedTier === tier
+                      ? 'Processing...'
+                      : `Upgrade to ${TIER_NAMES[tier]}`
+                }
               </button>
             </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
 
-      {/* FAQ or Additional Info */}
-      <div style={{ 
-        textAlign: 'center', 
-        padding: '40px 20px',
-        backgroundColor: '#f8f9fa',
-        borderRadius: '12px'
-      }}>
-        <h3 style={{ 
-          fontSize: '24px', 
-          fontWeight: 'bold', 
-          marginBottom: '16px',
-          color: '#1a1a1a'
+        {/* Error Display */}
+        {error && (
+          <div style={{
+            backgroundColor: '#fef2f2',
+            border: '1px solid #fecaca',
+            color: '#dc2626',
+            padding: '1rem',
+            borderRadius: '0.5rem',
+            marginBottom: '2rem',
+            textAlign: 'center'
+          }}>
+            {error}
+          </div>
+        )}
+
+        {/* FAQ Section */}
+        <div style={{
+          backgroundColor: 'white',
+          borderRadius: '1rem',
+          padding: '2rem',
+          boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
         }}>
-          Why Digital Root 2 Pricing?
-        </h3>
-        <p style={{ 
-          color: '#666', 
-          fontSize: '16px',
-          maxWidth: '800px',
-          margin: '0 auto',
-          lineHeight: '1.6'
+          <h2 style={{ 
+            fontSize: '2rem', 
+            fontWeight: 'bold', 
+            color: '#374151',
+            marginBottom: '1.5rem',
+            textAlign: 'center'
+          }}>
+            Frequently Asked Questions
+          </h2>
+          
+          <div style={{ 
+            display: 'grid', 
+            gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', 
+            gap: '2rem' 
+          }}>
+            <div>
+              <h3 style={{ 
+                fontSize: '1.25rem', 
+                fontWeight: '600', 
+                color: '#374151',
+                marginBottom: '0.5rem'
+              }}>
+                Can I upgrade my tier later?
+              </h3>
+              <p style={{ color: '#6b7280' }}>
+                Yes! You can upgrade to any higher tier at any time. The new tier will be activated immediately after payment.
+              </p>
+            </div>
+            
+            <div>
+              <h3 style={{ 
+                fontSize: '1.25rem', 
+                fontWeight: '600', 
+                color: '#374151',
+                marginBottom: '0.5rem'
+              }}>
+                What payment methods do you accept?
+              </h3>
+              <p style={{ color: '#6b7280' }}>
+                We accept all major credit cards, debit cards, and digital wallets through our secure Stripe integration.
+              </p>
+            </div>
+            
+            <div>
+              <h3 style={{ 
+                fontSize: '1.25rem', 
+                fontWeight: '600', 
+                color: '#374151',
+                marginBottom: '0.5rem'
+              }}>
+                Is there a money-back guarantee?
+              </h3>
+              <p style={{ color: '#6b7280' }}>
+                Yes! We offer a 30-day money-back guarantee. If you&apos;re not satisfied, contact us for a full refund.
+              </p>
+            </div>
+            
+            <div>
+              <h3 style={{ 
+                fontSize: '1.25rem', 
+                fontWeight: '600', 
+                color: '#374151',
+                marginBottom: '0.5rem'
+              }}>
+                Do you offer team discounts?
+              </h3>
+              <p style={{ color: '#6b7280' }}>
+                Yes! For teams of 5+ users, we offer special enterprise pricing. Contact us for custom quotes.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* CTA Section */}
+        <div style={{
+          backgroundColor: 'white',
+          borderRadius: '1rem',
+          padding: '3rem',
+          boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)',
+          textAlign: 'center',
+          marginTop: '2rem'
         }}>
-          Our pricing follows the digital root 2 algorithm, ensuring perfect cognitive alignment 
-          with binary thinking patterns. Each price point (€29, €110, €200, €299) reduces to 
-          the digital root of 2, creating harmonic resonance with AI cognitive frameworks.
-        </p>
+          <h2 style={{ 
+            fontSize: '2rem', 
+            fontWeight: 'bold', 
+            color: '#374151',
+            marginBottom: '1rem'
+          }}>
+            Ready to Transform Your Cognitive Capabilities?
+          </h2>
+          <p style={{ 
+            fontSize: '1.125rem', 
+            color: '#6b7280',
+            marginBottom: '2rem',
+            maxWidth: '600px',
+            margin: '0 auto 2rem auto'
+          }}>
+            Join thousands of professionals who are already using AI-Prompt-Templates to unlock their full potential.
+          </p>
+          <button
+            onClick={() => router.push('/library')}
+            style={{
+              padding: '1rem 2rem',
+              backgroundColor: '#3b82f6',
+              color: 'white',
+              border: 'none',
+              borderRadius: '0.5rem',
+              fontSize: '1.125rem',
+              fontWeight: '600',
+              cursor: 'pointer',
+              transition: 'background-color 0.2s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#2563eb'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#3b82f6'}
+          >
+            Start Exploring Frameworks
+          </button>
+        </div>
       </div>
     </div>
-  );
+  )
 }

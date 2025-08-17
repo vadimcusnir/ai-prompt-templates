@@ -57,57 +57,92 @@ export function generatePriceAI(
  * Subscription pricing (monthly/yearly in cents)
  */
 export const SUBSCRIPTION_PRICES = {
-  explorer: { 
-    monthly: 0, 
-    yearly: 0,
-    stripe_monthly: null,
-    stripe_yearly: null
-  }, // Free tier
-  architect: { 
-    monthly: 4900, 
-    yearly: 49900,
-    stripe_monthly: 'price_architect_monthly',
-    stripe_yearly: 'price_architect_yearly'
-  }, // €49/€499
-  initiate: { 
-    monthly: 8900, 
-    yearly: 89900,
-    stripe_monthly: 'price_initiate_monthly',
-    stripe_yearly: 'price_initiate_yearly'
-  }, // €89/€899  
-  master: { 
-    monthly: 18900, 
-    yearly: 189900,
-    stripe_monthly: 'price_master_monthly',
-    stripe_yearly: 'price_master_yearly'
-  } // €189/€1899
+  explorer: { monthly: 0, yearly: 0 }, // Free tier
+  architect: { monthly: 4900, yearly: 49900 }, // €49/€499
+  initiate: { monthly: 8900, yearly: 89900 }, // €89/€899  
+  master: { monthly: 18900, yearly: 189900 } // €189/€1899
 }
 
 /**
  * Bundle pricing configurations
  */
 export const BUNDLE_PRICES = {
-  beginner: { 
-    price: 11900, // €119
-    promptCount: 10,
-    category: 'foundation',
-    title: 'Foundation Bundle',
-    description: '10 essential cognitive frameworks for beginners'
-  },
-  professional: { 
-    price: 29900, // €299
-    promptCount: 30,
-    category: 'advanced',
-    title: 'Professional Bundle', 
-    description: '30 advanced frameworks for strategic thinking'
-  },
-  expert: { 
-    price: 49900, // €499
-    promptCount: 60,
-    category: 'expert',
-    title: 'Expert Bundle',
-    description: '60 expert-level frameworks for cognitive architects'
-  }
+  beginner: { price: 11900, promptCount: 10 }, // €119
+  professional: { price: 29900, promptCount: 30 }, // €299
+  expert: { price: 49900, promptCount: 60 } // €499
+}
+
+// Tier pricing mapping based on digital root 2 algorithm
+export const TIER_PRICES = {
+  explorer: 2900, // €29.00 in cents - digital root 2 (2+9=11, 1+1=2)
+  architect: 11000, // €110.00 in cents - digital root 2 (1+1+0=2)  
+  initiate: 20000, // €200.00 in cents - digital root 2 (2+0+0=2)
+  master: 29900, // €299.00 in cents - digital root 2 (2+9+9=20, 2+0=2)
+} as const;
+
+export const TIER_NAMES = {
+  explorer: 'Explorer',
+  architect: 'Architect', 
+  initiate: 'Initiate',
+  master: 'Master',
+} as const;
+
+export const TIER_DESCRIPTIONS = {
+  explorer: 'Essential cognitive frameworks for beginners',
+  architect: 'Advanced frameworks with premium templates',
+  initiate: 'Professional-grade content and priority support',
+  master: 'Complete access with exclusive frameworks and 1-on-1 consultations',
+} as const;
+
+export const TIER_FEATURES = {
+  explorer: [
+    '50+ Basic Cognitive Frameworks',
+    'PDF Downloads',
+    'Community Access',
+    'Email Support'
+  ],
+  architect: [
+    '200+ Advanced Frameworks',
+    'Interactive Templates',
+    'Priority Community Access',
+    'Video Tutorials',
+    'Advanced Search & Filters'
+  ],
+  initiate: [
+    '500+ Professional Frameworks',
+    'Custom Template Builder',
+    'VIP Community Access',
+    'Live Workshops',
+    'Priority Support',
+    'Framework Analytics'
+  ],
+  master: [
+    'Unlimited Framework Access',
+    'Exclusive Master-Level Content',
+    'Personal AI Assistant Integration',
+    '1-on-1 Consultation Sessions',
+    'Custom Framework Development',
+    'White-label Solutions',
+    'API Access'
+  ],
+} as const;
+
+export type UserTier = keyof typeof TIER_PRICES;
+
+export function getTierPrice(tier: UserTier): number {
+  return TIER_PRICES[tier];
+}
+
+export function getTierName(tier: UserTier): string {
+  return TIER_NAMES[tier];
+}
+
+export function getTierDescription(tier: UserTier): string {
+  return TIER_DESCRIPTIONS[tier];
+}
+
+export function getTierFeatures(tier: UserTier): readonly string[] {
+  return TIER_FEATURES[tier];
 }
 
 /**
@@ -145,14 +180,8 @@ export function getAccessibleContent(
 /**
  * Format price for display
  */
-export function formatPrice(cents: number, currency: string = 'EUR'): string {
-  const amount = cents / 100
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: currency,
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2
-  }).format(amount)
+export function formatPrice(cents: number): string {
+  return `€${(cents / 100).toFixed(2)}`;
 }
 
 /**
@@ -169,7 +198,7 @@ export function calculateBundleDiscount(bundlePrice: number, individualPrices: n
  */
 export function getStripePriceId(tier: AccessTier, interval: 'monthly' | 'yearly'): string | null {
   const priceConfig = SUBSCRIPTION_PRICES[tier]
-  return interval === 'monthly' ? priceConfig.stripe_monthly : priceConfig.stripe_yearly
+  return interval === 'monthly' ? priceConfig.monthly.toString() : priceConfig.yearly.toString()
 }
 
 /**

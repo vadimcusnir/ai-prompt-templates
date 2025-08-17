@@ -75,7 +75,6 @@ export default function AuthPage() {
           />
         ) : (
           <RegisterForm 
-            onSuccess={handleSuccess}
             onToggleMode={() => setMode('login')}
           />
         )}

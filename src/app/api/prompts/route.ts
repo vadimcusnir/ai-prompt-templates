@@ -1,36 +1,66 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createServiceClient } from '@/lib/supabase'
-import { getAccessibleContent } from '@/lib/pricing'
+import { createServiceClient } from '@/lib/supabase-server'
+import { getAccessibleContent } from '@/lib/access-gating'
+import { withRateLimit, RATE_LIMIT_CONFIGS } from '@/lib/rate-limit'
+import { validateAndSanitize, PromptSchema, SearchSchema } from '@/lib/validation'
+import { logger, logSecurity, logError } from '@/lib/logger'
 
-export async function GET(request: NextRequest) {
-  const supabase = createServiceClient()
-  const { searchParams } = new URL(request.url)
+// Rate limiting pentru endpoint-ul de prompt-uri
+const rateLimitedHandler = withRateLimit(async (request: NextRequest) => {
+  const startTime = Date.now()
   
-  const category = searchParams.get('category')
-  const search = searchParams.get('search')
-  const tier = searchParams.get('tier') as 'explorer' | 'architect' | 'initiate' | 'master' || 'explorer'
-
   try {
+    const supabase = createServiceClient()
+    const { searchParams } = new URL(request.url)
+    
+    const category = searchParams.get('category')
+    const search = searchParams.get('search')
+    const tier = searchParams.get('tier') as 'explorer' | 'architect' | 'initiate' | 'master' || 'explorer'
+
+    // Validare parametri de căutare
+    const searchValidation = validateAndSanitize(SearchSchema, {
+      search,
+      category,
+      tier,
+      difficulty: searchParams.get('difficulty'),
+      minPrice: searchParams.get('minPrice') ? parseInt(searchParams.get('minPrice')!) : undefined,
+      maxPrice: searchParams.get('maxPrice') ? parseInt(searchParams.get('maxPrice')!) : undefined,
+      minScore: searchParams.get('minScore') ? parseInt(searchParams.get('minScore')!) : undefined,
+      maxScore: searchParams.get('maxScore') ? parseInt(searchParams.get('maxScore')!) : undefined
+    })
+
+    if (!searchValidation.success) {
+      logSecurity('Invalid search parameters', { 
+        params: searchParams.toString(), 
+        errors: searchValidation.errors 
+      })
+      return NextResponse.json({ 
+        error: 'Invalid search parameters',
+        details: searchValidation.errors 
+      }, { status: 400 })
+    }
+
     let query = supabase
       .from('prompts')
       .select('*')
+      .eq('is_published', true)
 
     if (category) {
       query = query.eq('cognitive_category', category)
     }
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%,preview_content.ilike.%${search}%`)
+      query = query.textSearch('title,preview_content', search)
     }
 
     const { data: prompts, error } = await query.order('created_at', { ascending: false })
 
     if (error) {
-      console.error('Database error:', error)
-      return NextResponse.json({ error: error.message }, { status: 500 })
+      logError('Database query failed', { error: error.message, query: 'prompts select' })
+      return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
     }
 
-    // Apply access gating based on user tier
+    // Apply access gating
     const accessiblePrompts = prompts?.map(prompt => {
       const { content, hasFullAccess } = getAccessibleContent(
         prompt.full_content,
@@ -42,70 +72,109 @@ export async function GET(request: NextRequest) {
         ...prompt,
         content,
         hasFullAccess,
-        // Don't send full content to client unless they have access
-        full_content: hasFullAccess ? prompt.full_content : undefined,
-        // Format price for display
-        formatted_price: `€${(prompt.price_cents / 100).toFixed(2)}`
+        full_content: hasFullAccess ? prompt.full_content : undefined
       }
     }) || []
 
-    return NextResponse.json({ 
-      prompts: accessiblePrompts,
-      total: accessiblePrompts.length 
+    const duration = Date.now() - startTime
+    logger.performance('GET /api/prompts', duration, { 
+      count: accessiblePrompts.length,
+      tier,
+      category: category || 'all'
     })
 
+    return NextResponse.json({ prompts: accessiblePrompts })
+
   } catch (error) {
-    console.error('API error:', error)
+    const duration = Date.now() - startTime
+    logError('Unexpected error in GET /api/prompts', { 
+      duration,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    })
+    
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
-}
+}, RATE_LIMIT_CONFIGS.prompts)
 
-export async function POST(request: NextRequest) {
-  const supabase = createServiceClient()
+export const GET = rateLimitedHandler
+
+export const POST = withRateLimit(async (request: NextRequest) => {
+  const startTime = Date.now()
   
   try {
+    const supabase = createServiceClient()
+    
+    // Verificare Content-Type
+    const contentType = request.headers.get('content-type')
+    if (!contentType || !contentType.includes('application/json')) {
+      logSecurity('Invalid content type', { contentType })
+      return NextResponse.json({ error: 'Content-Type must be application/json' }, { status: 400 })
+    }
+    
     const promptData = await request.json()
     
-    // Validate required fields
-    const requiredFields = ['title', 'cognitive_category', 'difficulty_tier', 'preview_content', 'full_content', 'cognitive_depth_score', 'pattern_complexity', 'price_cents']
+    // Validare strictă a datelor
+    const validation = validateAndSanitize(PromptSchema, promptData)
     
-    for (const field of requiredFields) {
-      if (!promptData[field] && promptData[field] !== 0) {
-        return NextResponse.json({ error: `Missing required field: ${field}` }, { status: 400 })
-      }
+    if (!validation.success) {
+      logSecurity('Invalid prompt data', { 
+        errors: validation.errors,
+        dataKeys: Object.keys(promptData)
+      })
+      
+      return NextResponse.json({ 
+        error: 'Invalid prompt data',
+        details: validation.errors 
+      }, { status: 400 })
     }
     
-    // Generate slug from title if not provided
-    if (!promptData.slug) {
-      promptData.slug = promptData.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-    }
+    const sanitizedData = validation.data
+    
+    // Generate slug from title
+    const slug = sanitizedData.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
     
     // Set defaults
-    promptData.digital_root = 2 // Enforce digital root 2
-    promptData.view_count = 0
-    promptData.download_count = 0
-    promptData.average_rating = 0
-    promptData.total_ratings = 0
-    promptData.total_downloads = 0
+    const dataToInsert = {
+      ...sanitizedData,
+      slug,
+      digital_root: 2, // Enforce digital root 2
+      required_tier: sanitizedData.required_tier || 'explorer',
+      is_published: sanitizedData.is_published || false,
+      quality_score: sanitizedData.quality_score || 5
+    }
     
     const { data, error } = await supabase
       .from('prompts')
-      .insert(promptData)
+      .insert(dataToInsert)
       .select()
       .single()
 
     if (error) {
-      console.error('Insert error:', error)
-      return NextResponse.json({ error: error.message }, { status: 500 })
+      logError('Database insert failed', { 
+        error: error.message, 
+        data: { title: sanitizedData.title, category: sanitizedData.cognitive_category }
+      })
+      return NextResponse.json({ error: 'Failed to create prompt' }, { status: 500 })
     }
+
+    const duration = Date.now() - startTime
+    logger.performance('POST /api/prompts', duration, { 
+      promptId: data.id,
+      title: data.title
+    })
 
     return NextResponse.json({ prompt: data }, { status: 201 })
 
   } catch (error) {
-    console.error('POST error:', error)
-    return NextResponse.json({ error: 'Invalid request data' }, { status: 400 })
+    const duration = Date.now() - startTime
+    logError('Unexpected error in POST /api/prompts', { 
+      duration,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    })
+    
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
-}
+}, RATE_LIMIT_CONFIGS.admin)

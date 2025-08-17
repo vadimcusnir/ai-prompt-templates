@@ -1,56 +1,131 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { stripe } from '@/lib/stripe';
-import { createClient } from '@supabase/supabase-js';
-import { headers } from 'next/headers';
+import { NextRequest, NextResponse } from 'next/server'
+import { stripe } from '@/lib/stripe'
+import { createClient } from '@supabase/supabase-js'
+import { headers } from 'next/headers'
+import { withRateLimit, RATE_LIMIT_CONFIGS } from '@/lib/rate-limit'
+import { logger, logSecurity, logError } from '@/lib/logger'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+// Validare strictă a variabilelor de mediu
+function validateEnvironmentVariables() {
+  const requiredVars = {
+    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+    STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET
+  }
 
-export async function POST(request: NextRequest) {
+  const missingVars = Object.entries(requiredVars)
+    .filter(([, value]) => !value)
+    .map(([key]) => key)
+
+  if (missingVars.length > 0) {
+    throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`)
+  }
+
+  // Validare format URL Supabase
   try {
-    const body = await request.text();
-    const headersList = await headers();
-    const signature = headersList.get('stripe-signature');
+    new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!)
+  } catch {
+    throw new Error('Invalid NEXT_PUBLIC_SUPABASE_URL format')
+  }
+
+  // Validare format service role key
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY!.startsWith('eyJ')) {
+    throw new Error('Invalid SUPABASE_SERVICE_ROLE_KEY format')
+  }
+
+  // Validare webhook secret
+  if (!process.env.STRIPE_WEBHOOK_SECRET!.startsWith('whsec_')) {
+    throw new Error('Invalid STRIPE_WEBHOOK_SECRET format')
+  }
+}
+
+// Client Supabase securizat
+function createSecureSupabaseClient() {
+  if (process.env.NODE_ENV === 'production') {
+    validateEnvironmentVariables()
+  } else if (process.env.NODE_ENV === 'development') {
+    try {
+      validateEnvironmentVariables()
+    } catch (error) {
+      logger.warn('Environment validation failed in development', { error: error instanceof Error ? error.message : 'Unknown error' })
+      throw error
+    }
+  }
+
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+        detectSessionInUrl: false
+      }
+    }
+  )
+}
+
+// Rate limiting strict pentru webhook-uri (10 requests per minute)
+const rateLimitedHandler = withRateLimit(async (request: NextRequest) => {
+  const startTime = Date.now()
+  
+  try {
+    const body = await request.text()
+    const headersList = await headers()
+    const signature = headersList.get('stripe-signature')
 
     if (!signature || !process.env.STRIPE_WEBHOOK_SECRET) {
-      console.error('Missing Stripe signature or webhook secret');
+      logSecurity('Missing Stripe signature or webhook secret', { 
+        hasSignature: !!signature,
+        hasWebhookSecret: !!process.env.STRIPE_WEBHOOK_SECRET
+      })
       return NextResponse.json(
         { error: 'Missing signature' },
         { status: 400 }
-      );
+      )
     }
 
     // Verify webhook signature
-    let event;
+    let event
     try {
       event = stripe.webhooks.constructEvent(
         body,
         signature,
         process.env.STRIPE_WEBHOOK_SECRET
-      );
+      )
     } catch (err) {
-      console.error('Webhook signature verification failed:', err);
+      logSecurity('Webhook signature verification failed', { 
+        error: err instanceof Error ? err.message : 'Unknown error'
+      })
       return NextResponse.json(
         { error: 'Webhook signature verification failed' },
         { status: 400 }
-      );
+      )
     }
 
-    console.log('Stripe webhook event:', event.type);
+    // Logging de securitate pentru webhook-uri
+    logSecurity('Stripe webhook received', { 
+      eventType: event.type,
+      eventId: event.id,
+      ip: request.headers.get('x-forwarded-for')?.split(',')[0] || request.headers.get('x-real-ip') || 'unknown'
+    })
+
+    const supabase = createSecureSupabaseClient()
 
     // Handle the event
     switch (event.type) {
       case 'checkout.session.completed':
-        const session = event.data.object;
+        const session = event.data.object
         
         if (session.payment_status === 'paid') {
-          const { userId, tier } = session.metadata || {};
+          const { userId, tier } = session.metadata || {}
           
           if (!userId || !tier) {
-            console.error('Missing metadata in webhook:', session.metadata);
-            break;
+            logSecurity('Missing metadata in webhook', { 
+              sessionId: session.id,
+              metadata: session.metadata 
+            })
+            break
           }
 
           // Update user tier in Supabase
@@ -61,14 +136,18 @@ export async function POST(request: NextRequest) {
               subscription_status: 'active',
               updated_at: new Date().toISOString()
             })
-            .eq('id', userId);
+            .eq('id', userId)
 
           if (updateError) {
-            console.error('Failed to update user tier:', updateError);
+            logError('Failed to update user tier', { 
+              userId, 
+              tier, 
+              error: updateError.message 
+            })
             return NextResponse.json(
               { error: 'Failed to update user tier' },
               { status: 500 }
-            );
+            )
           }
 
           // Create payment record
@@ -83,35 +162,59 @@ export async function POST(request: NextRequest) {
               tier,
               status: 'completed',
               created_at: new Date().toISOString()
-            });
+            })
 
           if (paymentError) {
-            console.error('Failed to create payment record:', paymentError);
+            logError('Failed to create payment record', { 
+              userId, 
+              sessionId: session.id, 
+              error: paymentError.message 
+            })
           }
 
-          console.log(`Successfully upgraded user ${userId} to tier ${tier}`);
+          logger.info(`Successfully upgraded user ${userId} to tier ${tier}`)
         }
-        break;
+        break
 
       case 'payment_intent.succeeded':
-        console.log('PaymentIntent succeeded:', event.data.object.id);
-        break;
+        logger.info('PaymentIntent succeeded', { 
+          paymentIntentId: event.data.object.id 
+        })
+        break
 
       case 'payment_intent.payment_failed':
-        console.log('PaymentIntent failed:', event.data.object.id);
-        break;
+        logger.warn('PaymentIntent failed', { 
+          paymentIntentId: event.data.object.id 
+        })
+        break
 
       default:
-        console.log(`Unhandled event type: ${event.type}`);
+        logger.info(`Unhandled event type: ${event.type}`, { 
+          eventId: event.id 
+        })
     }
 
-    return NextResponse.json({ received: true });
+    const duration = Date.now() - startTime
+    logger.performance('POST /api/stripe/webhook', duration, { 
+      eventType: event.type,
+      eventId: event.id
+    })
+
+    return NextResponse.json({ received: true })
 
   } catch (error) {
-    console.error('Webhook error:', error);
+    const duration = Date.now() - startTime
+    logError('Webhook error', { 
+      duration,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    })
+    
     return NextResponse.json(
       { error: 'Webhook processing failed' },
       { status: 500 }
-    );
+    )
   }
-}
+}, RATE_LIMIT_CONFIGS.stripe)
+
+export const POST = rateLimitedHandler

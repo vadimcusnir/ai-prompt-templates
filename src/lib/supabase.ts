@@ -1,7 +1,7 @@
-import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
 import { createClient } from '@supabase/supabase-js'
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
 
-// Client-side Supabase client
+// Client-side client (for components)
 export const createClientSideClient = () => createClientComponentClient()
 
 // For server-side operations with service role (use only in server components or API routes)
@@ -10,6 +10,7 @@ export const createServiceClient = () => createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 )
 
+// Database types
 export type Database = {
   public: {
     Tables: {
@@ -25,20 +26,24 @@ export type Database = {
           full_content: string
           implementation_guide: string | null
           use_cases: any
+          meta_tags: string[]
           cognitive_depth_score: number
           pattern_complexity: number
           meaning_layers: string[]
           anti_surface_features: string[]
-          price_cents: number
+          base_price_cents: number
           digital_root: number
-          view_count: number
-          download_count: number
+          meta_title: string | null
+          meta_description: string | null
+          keywords: string[]
           created_at: string
-          average_rating: number
-          total_ratings: number
-          total_downloads: number
+          updated_at: string
+          published_at: string | null
+          is_published: boolean
+          quality_score: number
         }
         Insert: {
+          id?: string
           title: string
           slug: string
           cognitive_category: 'deep_analysis' | 'meaning_engineering' | 'cognitive_frameworks' | 'consciousness_mapping' | 'advanced_systems'
@@ -46,21 +51,26 @@ export type Database = {
           required_tier?: 'explorer' | 'architect' | 'initiate' | 'master'
           preview_content: string
           full_content: string
-          implementation_guide?: string
+          implementation_guide?: string | null
           use_cases?: any
+          meta_tags?: string[]
           cognitive_depth_score: number
           pattern_complexity: number
           meaning_layers?: string[]
           anti_surface_features?: string[]
-          price_cents: number
+          base_price_cents: number
           digital_root?: number
-          view_count?: number
-          download_count?: number
-          average_rating?: number
-          total_ratings?: number
-          total_downloads?: number
+          meta_title?: string | null
+          meta_description?: string | null
+          keywords?: string[]
+          created_at?: string
+          updated_at?: string
+          published_at?: string | null
+          is_published?: boolean
+          quality_score?: number
         }
         Update: {
+          id?: string
           title?: string
           slug?: string
           cognitive_category?: 'deep_analysis' | 'meaning_engineering' | 'cognitive_frameworks' | 'consciousness_mapping' | 'advanced_systems'
@@ -68,19 +78,23 @@ export type Database = {
           required_tier?: 'explorer' | 'architect' | 'initiate' | 'master'
           preview_content?: string
           full_content?: string
-          implementation_guide?: string
+          implementation_guide?: string | null
           use_cases?: any
+          meta_tags?: string[]
           cognitive_depth_score?: number
           pattern_complexity?: number
           meaning_layers?: string[]
           anti_surface_features?: string[]
-          price_cents?: number
+          base_price_cents?: number
           digital_root?: number
-          view_count?: number
-          download_count?: number
-          average_rating?: number
-          total_ratings?: number
-          total_downloads?: number
+          meta_title?: string | null
+          meta_description?: string | null
+          keywords?: string[]
+          created_at?: string
+          updated_at?: string
+          published_at?: string | null
+          is_published?: boolean
+          quality_score?: number
         }
       }
       bundles: {
@@ -90,8 +104,8 @@ export type Database = {
           slug: string
           description: string | null
           prompt_ids: string[]
-          category_filter: string | null
-          tier_filter: string | null
+          category_filter: 'deep_analysis' | 'meaning_engineering' | 'cognitive_frameworks' | 'consciousness_mapping' | 'advanced_systems' | null
+          tier_filter: 'foundation' | 'advanced' | 'expert' | 'architect' | null
           price_cents: number
           original_price_cents: number | null
           discount_percentage: number
@@ -100,27 +114,32 @@ export type Database = {
           is_active: boolean
         }
         Insert: {
+          id?: string
           title: string
           slug: string
-          description?: string
+          description?: string | null
           prompt_ids?: string[]
-          category_filter?: string
-          tier_filter?: string
+          category_filter?: 'deep_analysis' | 'meaning_engineering' | 'cognitive_frameworks' | 'consciousness_mapping' | 'advanced_systems' | null
+          tier_filter?: 'foundation' | 'advanced' | 'expert' | 'architect' | null
           price_cents: number
-          original_price_cents?: number
+          original_price_cents?: number | null
           discount_percentage?: number
+          created_at?: string
+          updated_at?: string
           is_active?: boolean
         }
         Update: {
+          id?: string
           title?: string
           slug?: string
-          description?: string
+          description?: string | null
           prompt_ids?: string[]
-          category_filter?: string
-          tier_filter?: string
+          category_filter?: 'deep_analysis' | 'meaning_engineering' | 'cognitive_frameworks' | 'consciousness_mapping' | 'advanced_systems' | null
+          tier_filter?: 'foundation' | 'advanced' | 'expert' | 'architect' | null
           price_cents?: number
-          original_price_cents?: number
+          original_price_cents?: number | null
           discount_percentage?: number
+          created_at?: string
           updated_at?: string
           is_active?: boolean
         }
@@ -140,23 +159,29 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          id?: string
           user_id: string
           tier: 'explorer' | 'architect' | 'initiate' | 'master'
-          stripe_subscription_id?: string
-          stripe_customer_id?: string
-          stripe_price_id?: string
-          status?: 'active' | 'canceled' | 'past_due' | 'incomplete'
-          current_period_start?: string
-          current_period_end?: string
+          stripe_subscription_id?: string | null
+          stripe_customer_id?: string | null
+          stripe_price_id?: string | null
+          status: 'active' | 'canceled' | 'past_due' | 'incomplete'
+          current_period_start?: string | null
+          current_period_end?: string | null
+          created_at?: string
+          updated_at?: string
         }
         Update: {
+          id?: string
+          user_id?: string
           tier?: 'explorer' | 'architect' | 'initiate' | 'master'
-          stripe_subscription_id?: string
-          stripe_customer_id?: string
-          stripe_price_id?: string
+          stripe_subscription_id?: string | null
+          stripe_customer_id?: string | null
+          stripe_price_id?: string | null
           status?: 'active' | 'canceled' | 'past_due' | 'incomplete'
-          current_period_start?: string
-          current_period_end?: string
+          current_period_start?: string | null
+          current_period_end?: string | null
+          created_at?: string
           updated_at?: string
         }
       }
@@ -175,21 +200,29 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          id?: string
           user_id: string
           item_type: 'prompt' | 'bundle'
           item_id: string
-          stripe_payment_intent_id?: string
-          stripe_customer_id?: string
+          stripe_payment_intent_id?: string | null
+          stripe_customer_id?: string | null
           amount_cents: number
           currency?: string
-          status?: 'succeeded' | 'pending' | 'failed'
+          status: 'succeeded' | 'pending' | 'failed'
+          created_at?: string
+          updated_at?: string
         }
         Update: {
-          stripe_payment_intent_id?: string
-          stripe_customer_id?: string
+          id?: string
+          user_id?: string
+          item_type?: 'prompt' | 'bundle'
+          item_id?: string
+          stripe_payment_intent_id?: string | null
+          stripe_customer_id?: string | null
           amount_cents?: number
           currency?: string
           status?: 'succeeded' | 'pending' | 'failed'
+          created_at?: string
           updated_at?: string
         }
       }

@@ -1,8 +1,9 @@
 'use client'
 
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useState, useCallback } from 'react'
 import { createClientSideClient } from '@/lib/supabase'
 import { User } from '@supabase/supabase-js'
+import { logger, logSecurity, logError } from '@/lib/logger'
 
 type UserTier = 'explorer' | 'architect' | 'initiate' | 'master'
 
@@ -25,6 +26,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   
   const supabase = createClientSideClient()
 
+  const getUserTier = useCallback(async (userId: string) => {
+    try {
+      const { data: subscription, error } = await supabase
+        .from('user_subscriptions')
+        .select('tier, status')
+        .eq('user_id', userId)
+        .eq('status', 'active')
+        .single()
+      
+      if (error || !subscription) {
+        // No active subscription, user is explorer tier
+        logger.info('User has no active subscription, defaulting to explorer tier', { userId })
+        setUserTier('explorer')
+      } else {
+        logger.info('User tier retrieved successfully', { 
+          userId, 
+          tier: subscription.tier 
+        })
+        setUserTier(subscription.tier as UserTier)
+      }
+    } catch (error) {
+      logError('Error getting user tier', { 
+        userId, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      })
+      setUserTier('explorer')
+    }
+  }, [supabase])
+
   useEffect(() => {
     // Get initial session
     const getInitialSession = async () => {
@@ -32,7 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const { data: { session }, error } = await supabase.auth.getSession()
         
         if (error) {
-          console.error('Error getting session:', error.message)
+          logError('Error getting session', { error: error.message })
         } else {
           setUser(session?.user ?? null)
           if (session?.user) {
@@ -40,7 +70,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           }
         }
       } catch (error) {
-        console.error('Session error:', error)
+        logError('Session error', { error: error instanceof Error ? error.message : 'Unknown error' })
       } finally {
         setLoading(false)
       }
@@ -51,7 +81,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        console.log('Auth state changed:', event, session?.user?.email)
+        logger.info('Auth state changed', { 
+          event, 
+          userEmail: session?.user?.email ? session.user.email.substring(0, 3) + '***@' + session.user.email.split('@')[1] : 'none'
+        })
         
         setUser(session?.user ?? null)
         
@@ -66,28 +99,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     )
 
     return () => subscription.unsubscribe()
-  }, [])
-
-  const getUserTier = async (userId: string) => {
-    try {
-      const { data: subscription, error } = await supabase
-        .from('user_subscriptions')
-        .select('tier, status')
-        .eq('user_id', userId)
-        .eq('status', 'active')
-        .single()
-      
-      if (error || !subscription) {
-        // No active subscription, user is explorer tier
-        setUserTier('explorer')
-      } else {
-        setUserTier(subscription.tier as UserTier)
-      }
-    } catch (error) {
-      console.error('Error getting user tier:', error)
-      setUserTier('explorer')
-    }
-  }
+  }, [getUserTier, supabase.auth])
 
   const signIn = async (email: string, password: string) => {
     try {
@@ -97,11 +109,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
 
       if (error) {
+        logError('Sign in failed', { 
+          email: email.substring(0, 3) + '***@' + email.split('@')[1],
+          error: error.message 
+        })
         return { error: error.message }
       }
 
+      logger.info('User signed in successfully', { 
+        userId: data.user?.id,
+        email: email.substring(0, 3) + '***@' + email.split('@')[1]
+      })
+
       return {}
     } catch (error) {
+      logError('Unexpected error during sign in', { 
+        email: email.substring(0, 3) + '***@' + email.split('@')[1],
+        error: error instanceof Error ? error.message : 'Unknown error'
+      })
       return { error: 'An unexpected error occurred' }
     }
   }
@@ -114,15 +139,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
 
       if (error) {
+        logError('Sign up failed', { 
+          email: email.substring(0, 3) + '***@' + email.split('@')[1],
+          error: error.message 
+        })
         return { error: error.message }
       }
 
       if (data.user && !data.user.email_confirmed_at) {
+        logger.info('User signup successful, email confirmation required', { 
+          userId: data.user.id,
+          email: email.substring(0, 3) + '***@' + email.split('@')[1]
+        })
         return { error: 'Please check your email to confirm your account' }
       }
 
+      logger.info('User signup successful', { 
+        userId: data.user?.id,
+        email: email.substring(0, 3) + '***@' + email.split('@')[1]
+      })
+
       return {}
     } catch (error) {
+      logError('Unexpected error during sign up', { 
+        email: email.substring(0, 3) + '***@' + email.split('@')[1],
+        error: error instanceof Error ? error.message : 'Unknown error'
+      })
       return { error: 'An unexpected error occurred' }
     }
   }
@@ -131,10 +173,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const { error } = await supabase.auth.signOut()
       if (error) {
-        console.error('Sign out error:', error.message)
+        logError('Sign out error', { error: error.message })
+      } else {
+        logger.info('User signed out successfully', { 
+          userId: user?.id,
+          email: user?.email ? user.email.substring(0, 3) + '***@' + user.email.split('@')[1] : 'unknown'
+        })
       }
     } catch (error) {
-      console.error('Sign out error:', error)
+      logError('Sign out error', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      })
     }
   }
 

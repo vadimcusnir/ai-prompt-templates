@@ -150,7 +150,7 @@ export function LoginForm({ onSuccess, onToggleMode }: LoginFormProps) {
       {onToggleMode && (
         <div style={{ textAlign: 'center', marginTop: '1.5rem' }}>
           <span style={{ fontSize: '0.875rem', color: '#6b7280' }}>
-            Don't have an account?{' '}
+            Don&apos;t have an account?{' '}
           </span>
           <button
             onClick={onToggleMode}
