@@ -1,5 +1,5 @@
 // /cursor/agent.ts
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, extname } from 'node:path';
 
 export function enforceLawsFromDox(dir = './dox'): { title: string, content: string }[] {
@@ -18,13 +18,20 @@ type Violation = {
 };
 
 const ROOT = process.cwd();
-const SRC_DIRS = ['src', 'apps', 'packages', 'database', 'supabase', 'sql', 'migrations', 'cursor'];
+const SRC_DIRS = ['src', 'apps', 'packages', 'database', 'supabase', 'sql', 'migrations', 'cursor', 'test'];
+
+// Directoare ignorate pentru performanță
+const IGNORE_DIRS = [
+  'node_modules', '.next', '.vercel', 'dist', 'build', 
+  '.git', 'coverage', 'logs', 'tmp', '.cache'
+];
 
 // --- Helpers
 function walk(dir: string): string[] {
   const entries = readdirSync(dir);
   const files: string[] = [];
   for (const e of entries) {
+    if (IGNORE_DIRS.includes(e)) continue;
     const p = join(dir, e);
     const s = statSync(p);
     if (s.isDirectory()) files.push(...walk(p));
@@ -62,25 +69,39 @@ const CRON_WRAPPERS = [
 ];
 
 const FORBIDDEN_CRON_TARGETS = [
-  // funcțiile „nucleu” care trebuie invocate NUMAI prin wrapper
+  // funcțiile „nucleu" care trebuie invocate NUMAI prin wrapper
   'public\\.refresh_tier_access_pool_all\\(',
   'public\\.check_library_cap_and_alert\\(',
   'public\\.check_preview_privileges_and_alert\\(',
   'public\\.check_bundle_consistency_and_alert\\('
 ];
 
+// Whitelist pentru fișiere permise (migrări, deployment, policies)
+const ALLOWED_FILES = [
+  /sql\/(?:migrations|deploy-|0\d_)/i,
+  /rls_policies|admin_roles|neuron_delete_guard/i,
+  /schema\.sql|setup\.sql/i
+];
+
+function isAllowedFile(path: string): boolean {
+  return ALLOWED_FILES.some(pattern => pattern.test(path));
+}
+
 function checkFile(path: string, text: string): Violation[] {
   const v: Violation[] = [];
-  const isSQL = extname(path).toLowerCase() === '.sql';
-  const isTS = extname(path).toLowerCase() === '.ts' || extname(path).toLowerCase() === '.tsx';
+  const isSQL = /\.(sql|psql)$/i.test(path);
+  const isTS = /\.(ts|tsx|jsx)$/i.test(path);
+  const isJS = /\.(js|mjs|cjs)$/i.test(path);
+  const isPrisma = /\.prisma$/i.test(path);
 
   // (1) Interzice SELECT pe tabele brute pentru suprafața FE
-  if ((isSQL || isTS) && /select\s+/i.test(text)) {
+  if ((isSQL || isTS || isJS || isPrisma) && /select\s+/i.test(text)) {
     for (const raw of RAW_TABLES) {
-      const rawRe = new RegExp(`\\bselect\\b[\\s\\S]*?\\bfrom\\b[\\s\\S]*?${raw}`, 'i');
+      // Regex îmbunătățit pentru JOIN, subquery, aliasuri
+      const rawRe = new RegExp(`\\bselect\\b[\\s\\S]*?(?:\\bfrom\\b|\\bjoin\\b)[\\s\\S]*?${raw.replace('public\\.', '')}\\b`, 'i');
       if (rawRe.test(text)) {
-        // dacă e o migrare internă, e ok; dacă e în API/FE, interzice
-        if (!/v_(bundle_public|plans_public)/i.test(text) && !/rpc_/i.test(text)) {
+        // Whitelist pentru migrări și deployment
+        if (!isAllowedFile(path) && !/v_(bundle_public|plans_public)/i.test(text) && !/rpc_/i.test(text)) {
           v.push({
             law: 'DB-01',
             file: path,
@@ -93,7 +114,7 @@ function checkFile(path: string, text: string): Violation[] {
   }
 
   // (2) Cron: doar wrapper-ele
-  if ((isSQL || isTS) && /cron\.schedule\s*\(/i.test(text)) {
+  if ((isSQL || isTS || isJS) && /cron\.schedule\s*\(/i.test(text)) {
     for (const forbidden of FORBIDDEN_CRON_TARGETS) {
       const forbRe = new RegExp(forbidden, 'i');
       if (forbRe.test(text)) {
@@ -145,16 +166,19 @@ function checkFile(path: string, text: string): Violation[] {
 
   // (4) Delete guard pe neuroni
   if (isSQL && /\bdelete\b[\s\S]*\bfrom\b[\s\S]*public\.neurons/i.test(text)) {
-    v.push({
-      law: 'DELETE-01',
-      file: path,
-      detail: `DELETE pe neurons găsit. Interzis dacă există obligații.`,
-      fix: `Folosește UPDATE ... SET published=false; triggerele blochează DELETE cu obligații.`
-    });
+    // Whitelist pentru fișiere de guard
+    if (!isAllowedFile(path)) {
+      v.push({
+        law: 'DELETE-01',
+        file: path,
+        detail: `DELETE pe neurons găsit. Interzis dacă există obligații.`,
+        fix: `Folosește UPDATE ... SET published=false; triggerele blochează DELETE cu obligații.`
+      });
+    }
   }
 
   // (5) Assets publice doar dacă neuron published
-  if ((isSQL || isTS) && /neuron_assets/i.test(text) && /select/i.test(text) && !/exists\s*\(\s*select\s+1\s+from\s+public\.neurons\s+n\s+where\s+n\.id\s*=\s*neuron_id\s+and\s+n\.published\s*=\s*true\s*\)/i.test(text)) {
+  if ((isSQL || isTS || isJS) && /neuron_assets/i.test(text) && /select/i.test(text) && !/exists\s*\(\s*select\s+1\s+from\s+public\.neurons\s+n\s+where\s+n\.id\s*=\s*neuron_id\s+and\s+n\.published\s*=\s*true\s*\)/i.test(text)) {
     v.push({
       law: 'ASSET-01',
       file: path,
@@ -163,7 +187,7 @@ function checkFile(path: string, text: string): Violation[] {
     });
   }
 
-  // (6) Arhitectură: interzice „brand switch” în aceeași aplicație
+  // (6) Arhitectură: interzice „brand switch" în aceeași aplicație
   if (isTS && /NEXT_PUBLIC_BRAND/i.test(text) && /AI_PROMPTS/i.test(text) && /VULTUS/i.test(text)) {
     v.push({
       law: 'ARCH-01',
@@ -177,27 +201,71 @@ function checkFile(path: string, text: string): Violation[] {
 }
 
 function main() {
+  const args = process.argv.slice(2);
+  const jsonOutput = args.includes('--json');
+  const softMode = args.includes('--soft');
+  const onlyRule = args.find(arg => arg.startsWith('--only='))?.split('=')[1];
+  
   const files: string[] = [];
   for (const dir of SRC_DIRS) {
     try {
       const abs = join(ROOT, dir);
-      files.push(...walk(abs));
-    } catch { /* ignore */ }
+      console.log(`🔍 Scanning directory: ${abs}`);
+      const dirFiles = walk(abs);
+      console.log(`  📁 Found ${dirFiles.length} files in ${dir}`);
+      files.push(...dirFiles);
+    } catch (e) { 
+      console.log(`❌ Error scanning ${dir}: ${e}`);
+    }
   }
 
   const violations: Violation[] = [];
   for (const f of files) {
-    if (!/\.(sql|ts|tsx|js|mjs|cjs)$/i.test(f)) continue;
+    if (!/\.(sql|psql|ts|tsx|jsx|js|mjs|cjs|prisma)$/i.test(f)) continue;
     const text = readFileSync(f, 'utf8');
-    violations.push(...checkFile(f, text));
+    const fileViolations = checkFile(f, text);
+    
+    // Filtrare pe regulă specifică dacă e specificată
+    if (onlyRule) {
+      violations.push(...fileViolations.filter(v => v.law === onlyRule));
+    } else {
+      violations.push(...fileViolations);
+    }
   }
 
   if (violations.length > 0) {
-    console.error('┏━━━━━━━━ Violări de Lege ━━━━━━━━');
-    for (const v of violations) {
-      console.error(`┣ [${v.law}] ${v.file}\n┣→ ${v.detail}\n┗↪ Fix: ${v.fix ?? '—'}`);
+    if (jsonOutput) {
+      const report = {
+        timestamp: new Date().toISOString(),
+        violations: violations.map(v => ({
+          law: v.law,
+          file: v.file.replace(ROOT, '.'),
+          detail: v.detail,
+          fix: v.fix
+        })),
+        summary: {
+          total: violations.length,
+          byLaw: violations.reduce((acc, v) => {
+            acc[v.law] = (acc[v.law] || 0) + 1;
+            return acc;
+          }, {} as Record<string, number>)
+        }
+      };
+      
+      if (!existsSync('./cursor/report')) {
+        mkdirSync('./cursor/report', { recursive: true });
+      }
+      writeFileSync('./cursor/report/law_report.json', JSON.stringify(report, null, 2));
+      console.log('📊 Report JSON generat în ./cursor/report/law_report.json');
     }
-    process.exit(1);
+    
+    if (!softMode) {
+      console.error('┏━━━━━━━━ Violări de Lege ━━━━━━━━');
+      for (const v of violations) {
+        console.error(`┣ [${v.law}] ${v.file}\n┣→ ${v.detail}\n┗↪ Fix: ${v.fix ?? '—'}`);
+      }
+      process.exit(1);
+    }
   } else {
     console.log('✔ Toate Legile sunt respectate.');
   }

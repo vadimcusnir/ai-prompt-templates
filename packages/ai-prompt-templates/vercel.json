@@ -1,0 +1,39 @@
+{
+  "name": "ai-prompt-templates",
+  "version": 2,
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "env": {
+    "BRAND_ID": "ai-prompt-templates",
+    "NEXT_PUBLIC_BRAND_NAME": "AI Prompt Templates",
+    "NEXT_PUBLIC_BRAND_DOMAIN": "ai-prompt-templates.com"
+  },
+  "functions": {
+    "app/api/**/*.ts": {
+      "maxDuration": 30
+    }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        }
+      ]
+    }
+  ]
+}

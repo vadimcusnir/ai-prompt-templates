@@ -1,0 +1,35 @@
+# Template pentru variabilele de mediu (.env.local)
+# Copiază acest conținut în fișierul .env.local și completează valorile
+
+# Supabase Configuration
+NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key_here
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key_here
+
+# Stripe Configuration (opțional)
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_your_stripe_publishable_key
+STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key
+STRIPE_WEBHOOK_SECRET=whsec_your_stripe_webhook_secret
+
+# Analytics Configuration
+NEXT_PUBLIC_ANALYTICS_ENDPOINT=/api/analytics
+NEXT_PUBLIC_GA_MEASUREMENT_ID=G-XXXXXXXXXX
+
+# Application Configuration
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+NODE_ENV=development
+
+# Database Configuration
+DATABASE_URL=postgresql://postgres:your_password@localhost:5432/postgres
+
+# Security
+JWT_SECRET=your_jwt_secret_here
+ENCRYPTION_KEY=your_encryption_key_here
+
+# Rate Limiting
+RATE_LIMIT_WINDOW_MS=900000
+RATE_LIMIT_MAX_REQUESTS=100
+
+# Logging
+LOG_LEVEL=info
+LOG_TO_FILE=false

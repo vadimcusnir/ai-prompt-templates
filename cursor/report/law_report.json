@@ -1,0 +1,55 @@
+{
+  "timestamp": "2025-08-17T09:55:59.142Z",
+  "violations": [
+    {
+      "law": "DB-01",
+      "file": "./sql/27_slug_ci_and_validation.sql",
+      "detail": "SELECT pe tabel brut detectat (public\\.bundles). Folosește views/RPC.",
+      "fix": "Înlocuiește cu v_plans_public / v_bundle_public / rpc_search_neurons / rpc_get_my_active_plan / rpc_list_my_entitlements."
+    },
+    {
+      "law": "DB-01",
+      "file": "./sql/27_slug_ci_and_validation.sql",
+      "detail": "SELECT pe tabel brut detectat (public\\.neurons). Folosește views/RPC.",
+      "fix": "Înlocuiește cu v_plans_public / v_bundle_public / rpc_search_neurons / rpc_get_my_active_plan / rpc_list_my_entitlements."
+    },
+    {
+      "law": "DB-01",
+      "file": "./sql/performance_indexes.sql",
+      "detail": "SELECT pe tabel brut detectat (public\\.bundles). Folosește views/RPC.",
+      "fix": "Înlocuiește cu v_plans_public / v_bundle_public / rpc_search_neurons / rpc_get_my_active_plan / rpc_list_my_entitlements."
+    },
+    {
+      "law": "DB-01",
+      "file": "./sql/performance_indexes.sql",
+      "detail": "SELECT pe tabel brut detectat (public\\.neurons). Folosește views/RPC.",
+      "fix": "Înlocuiește cu v_plans_public / v_bundle_public / rpc_search_neurons / rpc_get_my_active_plan / rpc_list_my_entitlements."
+    },
+    {
+      "law": "DB-01",
+      "file": "./sql/performance_indexes.sql",
+      "detail": "SELECT pe tabel brut detectat (public\\.user_subscriptions). Folosește views/RPC.",
+      "fix": "Înlocuiește cu v_plans_public / v_bundle_public / rpc_search_neurons / rpc_get_my_active_plan / rpc_list_my_entitlements."
+    },
+    {
+      "law": "ASSET-01",
+      "file": "./cursor/agent.ts",
+      "detail": "Acces assets fără condiția published=true.",
+      "fix": "Aplică politica RLS sau EXISTS(...) pe neurons.published=true."
+    },
+    {
+      "law": "ARCH-01",
+      "file": "./cursor/agent.ts",
+      "detail": "Mixaj de branduri într-un singur app.",
+      "fix": "Separă aplicațiile (ai-prompt-templates/ și 8vultus/) cu shared libs, nu shared UI runtime."
+    }
+  ],
+  "summary": {
+    "total": 7,
+    "byLaw": {
+      "DB-01": 5,
+      "ASSET-01": 1,
+      "ARCH-01": 1
+    }
+  }
+}

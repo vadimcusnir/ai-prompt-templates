@@ -1,0 +1,122 @@
+/* Brand Theme Variables */
+:root {
+  /* Default theme (AI Prompt Templates) */
+  --color-primary: #3B82F6;
+  --color-secondary: #1E40AF;
+  --color-accent: #60A5FA;
+  --color-background: #FFFFFF;
+  --color-text: #1F2937;
+  --color-muted: #6B7280;
+  --color-border: #E5E7EB;
+  
+  /* Typography */
+  --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.25rem;
+  --font-size-2xl: 1.5rem;
+  --font-size-3xl: 1.875rem;
+  
+  /* Spacing */
+  --spacing-1: 0.25rem;
+  --spacing-2: 0.5rem;
+  --spacing-3: 0.75rem;
+  --spacing-4: 1rem;
+  --spacing-5: 1.25rem;
+  --spacing-6: 1.5rem;
+  --spacing-8: 2rem;
+  --spacing-10: 2.5rem;
+  --spacing-12: 3rem;
+  
+  /* Border radius */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+}
+
+/* AI Prompt Templates Theme */
+:root[data-brand="ai-prompt-templates"] {
+  --color-primary: #3B82F6;
+  --color-secondary: #1E40AF;
+  --color-accent: #60A5FA;
+  --color-background: #FFFFFF;
+  --color-text: #1F2937;
+  --color-muted: #6B7280;
+  --color-border: #E5E7EB;
+}
+
+/* 8Vultus Theme */
+:root[data-brand="8vultus"] {
+  --color-primary: #8B5CF6;
+  --color-secondary: #7C3AED;
+  --color-accent: #A78BFA;
+  --color-background: #0F0F23;
+  --color-text: #F8FAFC;
+  --color-muted: #94A3B8;
+  --color-border: #334155;
+}
+
+/* Utility Classes */
+.bg-primary { background-color: var(--color-primary); }
+.bg-secondary { background-color: var(--color-secondary); }
+.bg-accent { background-color: var(--color-accent); }
+.bg-background { background-color: var(--color-background); }
+
+.text-primary { color: var(--color-primary); }
+.text-secondary { color: var(--color-secondary); }
+.text-accent { color: var(--color-accent); }
+.text-foreground { color: var(--color-text); }
+.text-muted { color: var(--color-muted); }
+
+.border-primary { border-color: var(--color-primary); }
+.border-secondary { border-color: var(--color-secondary); }
+.border-accent { border-color: var(--color-accent); }
+.border-border { border-color: var(--color-border); }
+
+/* Brand-specific animations */
+@keyframes ai-prompt-glow {
+  0%, 100% { box-shadow: 0 0 5px var(--color-primary); }
+  50% { box-shadow: 0 0 20px var(--color-primary), 0 0 30px var(--color-accent); }
+}
+
+@keyframes eightvultus-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.05); opacity: 0.8; }
+}
+
+.ai-prompt-glow {
+  animation: ai-prompt-glow 2s ease-in-out infinite;
+}
+
+.eightvultus-pulse {
+  animation: eightvultus-pulse 3s ease-in-out infinite;
+}
+
+/* Responsive design */
+@media (prefers-color-scheme: dark) {
+  :root[data-brand="ai-prompt-templates"] {
+    --color-background: #111827;
+    --color-text: #F9FAFB;
+    --color-muted: #9CA3AF;
+    --color-border: #374151;
+  }
+}
+
+/* High contrast mode */
+@media (prefers-contrast: high) {
+  :root {
+    --color-primary: #0000FF;
+    --color-secondary: #000080;
+    --color-accent: #8000FF;
+  }
+}
