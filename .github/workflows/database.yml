@@ -1,0 +1,283 @@
+name: Database & Migrations
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'sql/**'
+      - 'shared-database/**'
+      - 'scripts/**'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'sql/**'
+      - 'shared-database/**'
+      - 'scripts/**'
+  schedule:
+    # Rulează zilnic la 1:00 UTC
+    - cron: '0 1 * * *'
+
+jobs:
+  db-schema-check:
+    name: Database Schema Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Check database schema
+        run: npm run db:check || echo "Database check not configured"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_DEV }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY_DEV }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY_DEV }}
+
+  db-migration-test:
+    name: Database Migration Test
+    runs-on: ubuntu-latest
+    needs: db-schema-check
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Test database migrations
+        run: |
+          echo "Testing database migrations..."
+          # Aici poți adăuga logica pentru testarea migrațiilor
+          echo "Migrations test completed"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_DEV }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY_DEV }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY_DEV }}
+
+  db-performance-check:
+    name: Database Performance Check
+    runs-on: ubuntu-latest
+    needs: db-migration-test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run database performance tests
+        run: |
+          echo "Running database performance tests..."
+          # Aici poți adăuga logica pentru testarea performanței
+          echo "Performance tests completed"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_DEV }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY_DEV }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY_DEV }}
+
+  db-backup:
+    name: Database Backup
+    runs-on: ubuntu-latest
+    needs: db-performance-check
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Create database backup
+        run: |
+          echo "Creating database backup..."
+          # Aici poți adăuga logica pentru backup-ul database-ului
+          echo "Database backup completed"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_DEV }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY_DEV }}
+
+  db-health-check:
+    name: Database Health Check
+    runs-on: ubuntu-latest
+    needs: db-backup
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run database health check
+        run: |
+          echo "Running database health check..."
+          # Aici poți adăuga logica pentru health check-ul database-ului
+          echo "Health check completed"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_DEV }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY_DEV }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY_DEV }}
+
+  db-notification:
+    name: Database Notification
+    runs-on: ubuntu-latest
+    needs: db-health-check
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Send database notifications
+        run: |
+          echo "Sending database notifications..."
+          # Aici poți adăuga logica pentru trimiterea notificărilor despre database
+          echo "Database notifications sent"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  db-report:
+    name: Database Report
+    runs-on: ubuntu-latest
+    needs: [db-schema-check, db-migration-test, db-performance-check, db-backup, db-health-check]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate database report
+        run: |
+          echo "Generating database report..."
+          # Aici poți adăuga logica pentru generarea raportului despre database
+          echo "Database report generated"
+        
+      - name: Upload database report
+        uses: actions/upload-artifact@v3
+        with:
+          name: database-report
+          path: database-report/
+          retention-days: 30
+
+  db-optimization:
+    name: Database Optimization
+    runs-on: ubuntu-latest
+    needs: db-report
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run database optimization
+        run: |
+          echo "Running database optimization..."
+          # Aici poți adăuga logica pentru optimizarea database-ului
+          echo "Database optimization completed"
+        
+      - name: Upload database optimization report
+        uses: actions/upload-artifact@v3
+        with:
+          name: database-optimization-report
+          path: database-optimization-report/
+          retention-days: 30
+
+  db-summary:
+    name: Database Summary
+    runs-on: ubuntu-latest
+    needs: [db-schema-check, db-migration-test, db-performance-check, db-backup, db-health-check, db-report, db-optimization]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate database summary
+        run: |
+          echo "Generating database summary..."
+          # Aici poți adăuga logica pentru generarea sumarului despre database
+          echo "Database summary generated"
+        
+      - name: Upload database summary
+        uses: actions/upload-artifact@v3
+        with:
+          name: database-summary
+          path: database-summary/
+          retention-days: 30

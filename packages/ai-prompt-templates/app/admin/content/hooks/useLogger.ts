@@ -1,5 +1,5 @@
 import { useCallback, useRef, useEffect } from 'react'
-import { logError, logInfo, logWarn } from '../../../../lib/logger'
+import { logError, logInfo, logWarn } from '@/lib/logger'
 
 interface LogEntry {
   id: string

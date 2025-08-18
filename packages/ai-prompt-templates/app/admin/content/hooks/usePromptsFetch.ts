@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { Prompt } from '../types'
-import { logError } from '../../../../lib/logger'
+import { logError } from '@/lib/logger'
 
 export const usePromptsFetch = (updateCache: (prompts: Prompt[]) => void) => {
   const [loading, setLoading] = useState(false)

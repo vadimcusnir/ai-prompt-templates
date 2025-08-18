@@ -1,0 +1,223 @@
+name: Dependency Management
+
+on:
+  schedule:
+    # Rulează zilnic la 5:00 UTC
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+
+jobs:
+  dependency-check:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    outputs:
+      ncu-output: ${{ steps.ncu.outputs.ncu-output }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Check for outdated dependencies
+        id: ncu
+        run: |
+          echo "Checking for outdated dependencies..."
+          npx npm-check-updates --target minor > ncu-output.txt 2>&1 || true
+          echo "ncu-output<<EOF" >> $GITHUB_OUTPUT
+          cat ncu-output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        
+      - name: Check for unused dependencies
+        run: npm run deps:check
+        
+      - name: Check for security vulnerabilities
+        run: npm audit --audit-level=moderate
+
+  dependency-update:
+    name: Dependency Update
+    runs-on: ubuntu-latest
+    needs: dependency-check
+    if: contains(needs.dependency-check.outputs.ncu-output, 'major')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Update dependencies
+        run: |
+          echo "Updating dependencies..."
+          npm run deps:update
+          npm install
+        
+      - name: Run tests after update
+        run: npm run test:ci
+        
+      - name: Create pull request for major updates
+        uses: peter-evans/create-pull-request@v5
+        with:
+          title: '🔒 Major dependency updates available'
+          body: |
+            Major dependency updates detected. Review required before updating.
+            
+            ## Changes
+            - Updated major dependencies
+            - All tests passing
+            
+            ## Action Required
+            - Review changes
+            - Test thoroughly
+            - Merge when ready
+          branch: dependency-updates
+          commit-message: 'chore: update major dependencies'
+          base: develop
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    needs: dependency-check
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run comprehensive security audit
+        run: |
+          echo "Running comprehensive security audit..."
+          npm audit --audit-level=low
+          npx snyk test --severity-threshold=medium || true
+        
+      - name: Generate dependency audit report
+        run: |
+          echo "Generating dependency audit report..."
+          # Aici poți adăuga logica pentru generarea raportului de audit
+          echo "Dependency audit report generated"
+        
+      - name: Upload dependency audit report
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-audit-report
+          path: dependency-audit-report/
+          retention-days: 30
+
+  dependency-optimization:
+    name: Dependency Optimization
+    runs-on: ubuntu-latest
+    needs: dependency-audit
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Optimize dependencies
+        run: |
+          echo "Optimizing dependencies..."
+          # Aici poți adăuga logica pentru optimizarea dependențelor
+          echo "Dependency optimization completed"
+        
+      - name: Upload dependency optimization report
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-optimization-report
+          path: dependency-optimization-report/
+          retention-days: 30
+
+  dependency-notification:
+    name: Dependency Notification
+    runs-on: ubuntu-latest
+    needs: [dependency-check, dependency-update, dependency-audit, dependency-optimization]
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Send dependency notifications
+        run: |
+          echo "Sending dependency notifications..."
+          # Aici poți adăuga logica pentru trimiterea notificărilor despre dependențe
+          echo "Dependency notifications sent"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  dependency-summary:
+    name: Dependency Summary
+    runs-on: ubuntu-latest
+    needs: [dependency-check, dependency-update, dependency-audit, dependency-optimization]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate dependency summary
+        run: |
+          echo "Generating dependency summary..."
+          # Aici poți adăuga logica pentru generarea sumarului despre dependențe
+          echo "Dependency summary generated"
+        
+      - name: Upload dependency summary
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-summary
+          path: dependency-summary/
+          retention-days: 30

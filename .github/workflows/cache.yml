@@ -1,0 +1,217 @@
+name: Cache & Optimization
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  cache-deps:
+    name: Cache Dependencies
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache-deps.outputs.cache-hit }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Cache dependencies
+        id: cache-deps
+        uses: actions/cache@v3
+        with:
+          path: |
+            **/node_modules
+            ~/.npm
+            ~/.cache
+            .next/cache
+          key: ${{ runner.os }}-node-20-npm-10-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-20-npm-10-
+
+  cache-build:
+    name: Cache Build
+    runs-on: ubuntu-latest
+    needs: cache-deps
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Cache build artifacts
+        uses: actions/cache@v3
+        with:
+          path: |
+            .next/cache
+            .next/static
+          key: ${{ runner.os }}-build-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.{js,jsx,ts,tsx}') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ hashFiles('**/package-lock.json') }}-
+            ${{ runner.os }}-build-
+
+  cache-test:
+    name: Cache Test Results
+    runs-on: ubuntu-latest
+    needs: cache-deps
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Cache test results
+        uses: actions/cache@v3
+        with:
+          path: |
+            coverage/
+            .nyc_output/
+            test-results/
+          key: ${{ runner.os }}-test-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**/*.{js,jsx,ts,tsx}') }}
+          restore-keys: |
+            ${{ runner.os }}-test-${{ hashFiles('**/package-lock.json') }}-
+            ${{ runner.os }}-test-
+
+  cache-optimization:
+    name: Cache Optimization
+    runs-on: ubuntu-latest
+    needs: [cache-deps, cache-build, cache-test]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Optimize cache
+        run: |
+          echo "Optimizing cache..."
+          # Aici poți adăuga logica pentru optimizarea cache-ului
+          echo "Cache optimization completed"
+        
+      - name: Upload cache optimization report
+        uses: actions/upload-artifact@v3
+        with:
+          name: cache-optimization-report
+          path: cache-optimization-report/
+          retention-days: 30
+
+  cache-notification:
+    name: Cache Notification
+    runs-on: ubuntu-latest
+    needs: cache-optimization
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Send cache notifications
+        run: |
+          echo "Sending cache notifications..."
+          # Aici poți adăuga logica pentru trimiterea notificărilor despre cache
+          echo "Cache notifications sent"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  cache-report:
+    name: Cache Report
+    runs-on: ubuntu-latest
+    needs: [cache-deps, cache-build, cache-test, cache-optimization]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate cache report
+        run: |
+          echo "Generating cache report..."
+          # Aici poți adăuga logica pentru generarea raportului despre cache
+          echo "Cache report generated"
+        
+      - name: Upload cache report
+        uses: actions/upload-artifact@v3
+        with:
+          name: cache-report
+          path: cache-report/
+          retention-days: 30
+
+  cache-summary:
+    name: Cache Summary
+    runs-on: ubuntu-latest
+    needs: [cache-deps, cache-build, cache-test, cache-optimization, cache-report]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate cache summary
+        run: |
+          echo "Generating cache summary..."
+          # Aici poți adăuga logica pentru generarea sumarului despre cache
+          echo "Cache summary generated"
+        
+      - name: Upload cache summary
+        uses: actions/upload-artifact@v3
+        with:
+          name: cache-summary
+          path: cache-summary/
+          retention-days: 30

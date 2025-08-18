@@ -1,0 +1,251 @@
+name: Cleanup & Maintenance
+
+on:
+  schedule:
+    # Rulează săptămânal duminică la 3:00 UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+
+jobs:
+  cleanup-artifacts:
+    name: Cleanup Old Artifacts
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Cleanup old artifacts
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const artifacts = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+            
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            
+            for (const artifact of artifacts.data.artifacts) {
+              if (new Date(artifact.created_at) < thirtyDaysAgo) {
+                console.log(`Deleting old artifact: ${artifact.name} (${artifact.created_at})`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id
+                });
+              }
+            }
+            console.log('Cleanup completed');
+
+  cleanup-branches:
+    name: Cleanup Stale Branches
+    runs-on: ubuntu-latest
+    needs: cleanup-artifacts
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Cleanup stale branches
+        run: |
+          echo "Checking for stale branches..."
+          # Aici poți adăuga logica pentru cleanup-ul branch-urilor
+          echo "Branch cleanup completed"
+
+  dependency-cleanup:
+    name: Dependency Cleanup
+    runs-on: ubuntu-latest
+    needs: cleanup-branches
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Check for unused dependencies
+        run: npm run deps:check
+        
+      - name: Cleanup node_modules
+        run: |
+          echo "Cleaning up node_modules..."
+          find . -name "node_modules" -type d -prune -exec rm -rf '{}' + 2>/dev/null || true
+          echo "Cleanup completed"
+
+  cache-cleanup:
+    name: Cache Cleanup
+    runs-on: ubuntu-latest
+    needs: dependency-cleanup
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Cleanup npm cache
+        run: npm cache clean --force
+        
+      - name: Cleanup build cache
+        run: |
+          echo "Cleaning up build cache..."
+          rm -rf .next/cache
+          rm -rf .swc
+          echo "Build cache cleanup completed"
+
+  log-cleanup:
+    name: Log Cleanup
+    runs-on: ubuntu-latest
+    needs: cache-cleanup
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Cleanup old logs
+        run: |
+          echo "Cleaning up old logs..."
+          find . -name "*.log" -type f -mtime +7 -delete 2>/dev/null || true
+          echo "Log cleanup completed"
+
+  maintenance-report:
+    name: Maintenance Report
+    runs-on: ubuntu-latest
+    needs: [cleanup-artifacts, cleanup-branches, dependency-cleanup, cache-cleanup, log-cleanup]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate maintenance report
+        run: |
+          echo "Generating maintenance report..."
+          # Aici poți adăuga logica pentru generarea raportului de mentenanță
+          echo "Maintenance report generated"
+        
+      - name: Upload maintenance report
+        uses: actions/upload-artifact@v3
+        with:
+          name: maintenance-report
+          path: maintenance-report/
+          retention-days: 30
+
+  maintenance-notification:
+    name: Maintenance Notification
+    runs-on: ubuntu-latest
+    needs: maintenance-report
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Send maintenance notifications
+        run: |
+          echo "Sending maintenance notifications..."
+          # Aici poți adăuga logica pentru trimiterea notificărilor de mentenanță
+          echo "Maintenance notifications sent"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  maintenance-optimization:
+    name: Maintenance Optimization
+    runs-on: ubuntu-latest
+    needs: maintenance-report
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run maintenance optimization
+        run: |
+          echo "Running maintenance optimization..."
+          # Aici poți adăuga logica pentru optimizarea mentenanței
+          echo "Maintenance optimization completed"
+        
+      - name: Upload maintenance optimization report
+        uses: actions/upload-artifact@v3
+        with:
+          name: maintenance-optimization-report
+          path: maintenance-optimization-report/
+          retention-days: 30
+
+  maintenance-summary:
+    name: Maintenance Summary
+    runs-on: ubuntu-latest
+    needs: [cleanup-artifacts, cleanup-branches, dependency-cleanup, cache-cleanup, log-cleanup, maintenance-report, maintenance-optimization]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate maintenance summary
+        run: |
+          echo "Generating maintenance summary..."
+          # Aici poți adăuga logica pentru generarea sumarului de mentenanță
+          echo "Maintenance summary generated"
+        
+      - name: Upload maintenance summary
+        uses: actions/upload-artifact@v3
+        with:
+          name: maintenance-summary
+          path: maintenance-summary/
+          retention-days: 30

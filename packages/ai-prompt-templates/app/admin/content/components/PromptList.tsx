@@ -1,5 +1,5 @@
 import React from 'react'
-import { formatPrice } from '../../../../lib/stripe'
+import { formatPrice } from '@/lib/stripe'
 import { Prompt, CognitiveCategory, DifficultyTier } from '../types'
 
 interface PromptListProps {

@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react'
 import { NewPrompt, Prompt } from '../types'
-import { logError } from '../../../../lib/logger'
+import { logError } from '@/lib/logger'
 
 export const usePromptForm = (
   invalidateCache: () => void,

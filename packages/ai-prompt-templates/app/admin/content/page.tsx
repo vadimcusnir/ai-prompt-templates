@@ -1,9 +1,9 @@
 'use client'
 
 import React, { useState, useEffect, useCallback, useMemo, Suspense, lazy } from 'react'
-import { useAuth } from '../../../../contexts/AuthContext'
+import { useAuth } from '@/contexts/AuthContext'
 import { useRouter } from 'next/navigation'
-import ProtectedRoute from '../../../../components/ProtectedRoute'
+import ProtectedRoute from '@/components/ProtectedRoute'
 import { useLogger } from './hooks/useLogger'
 import { useMonitoring } from './hooks/useMonitoring'
 import { useSecurity } from './hooks/useSecurity'
