@@ -9,6 +9,19 @@ on:
 env:
   NODE_VERSION: '18'
   PNPM_VERSION: '8'
+  # Default values for environment variables (will be overridden by secrets)
+  NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL || '' }}
+  NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || '' }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL || '' }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || '' }}
+  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN || '' }}
+  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN || '' }}
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID || '' }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID || '' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL || '' }}
+  LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN || '' }}
+  STAGING_URL: ${{ secrets.STAGING_URL || '' }}
+  TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL || '' }}
 
 jobs:
   # Lint and Type Check
@@ -110,8 +123,8 @@ jobs:
       - name: Build application
         run: npm run build
         env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ env.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
       
       - name: Upload build artifacts
         uses: actions/upload-artifact@v3
@@ -141,8 +154,8 @@ jobs:
       - name: Check database migrations
         run: npm run db:check
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ env.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ env.SUPABASE_SERVICE_ROLE_KEY }}
 
   # Security Audit
   security:
@@ -168,7 +181,7 @@ jobs:
       - name: Run Snyk security scan
         uses: snyk/actions/node@master
         env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          SNYK_TOKEN: ${{ env.SNYK_TOKEN }}
         with:
           args: --severity-threshold=high
 
@@ -196,9 +209,9 @@ jobs:
       - name: Deploy to Vercel (Staging)
         uses: amondnet/vercel-action@v25
         with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-token: ${{ env.VERCEL_TOKEN }}
+          vercel-org-id: ${{ env.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ env.VERCEL_PROJECT_ID }}
           vercel-args: '--prod'
           working-directory: ./
 
@@ -226,9 +239,9 @@ jobs:
       - name: Deploy to Vercel (Production)
         uses: amondnet/vercel-action@v25
         with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-token: ${{ env.VERCEL_TOKEN }}
+          vercel-org-id: ${{ env.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ env.VERCEL_PROJECT_ID }}
           vercel-args: '--prod'
           working-directory: ./
       
@@ -237,7 +250,7 @@ jobs:
         with:
           status: ${{ job.status }}
           channel: '#deployments'
-          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
         if: always()
 
   # Performance Testing
@@ -263,7 +276,7 @@ jobs:
       - name: Run Lighthouse CI
         run: npm run lighthouse
         env:
-          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+          LHCI_GITHUB_APP_TOKEN: ${{ env.LHCI_GITHUB_APP_TOKEN }}
 
   # Integration Tests
   integration:
@@ -288,8 +301,8 @@ jobs:
       - name: Run integration tests
         run: npm run test:integration
         env:
-          STAGING_URL: ${{ secrets.STAGING_URL }}
-          TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+          STAGING_URL: ${{ env.STAGING_URL }}
+          TEST_DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
 
   # Final Status Check
   status-check:

@@ -1,47 +1,30 @@
 {
-  "name": "ai-prompt-templates",
+  "name": "ai-dual-brand-platform",
   "version": "0.1.0",
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "type-check": "tsc --noEmit",
-    "test": "jest",
-    "test:ci": "jest --ci --coverage --watchAll=false",
-    "test:watch": "jest --watch",
-    "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui",
-    "test:integration": "jest --config jest.integration.config.js",
-    "test:smoke": "jest --config jest.smoke.config.js",
-    "test:performance": "jest --config jest.performance.config.js",
-    "db:migrate": "supabase db push",
-    "db:reset": "supabase db reset",
-    "db:check": "supabase db diff",
-    "db:seed": "supabase db seed",
-    "studio:seed": "npm run db:seed",
-    "lighthouse": "lhci autorun",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "deploy:dev": "vercel --env development",
-    "deploy:prod": "vercel --prod --env production",
-    "rollback": "vercel rollback",
-    "prepare": "husky install"
+    "law:check": "npx tsx ./cursor/agent.ts",
+    "law:check:soft": "npx tsx ./cursor/agent.ts --soft",
+    "law:check:json": "npx tsx ./cursor/agent.ts --json",
+    "law:test": "npx tsx ./cursor/agent.ts --only=DB-01 && npx tsx ./cursor/agent.ts --only=CRON-01 && npx tsx ./cursor/agent.ts --only=PLANS-01 && npx tsx ./cursor/agent.ts --only=DELETE-01 && npx tsx ./cursor/agent.ts --only=ASSET-01 && npx tsx ./cursor/agent.ts --only=ARCH-01"
   },
   "dependencies": {
     "@stripe/stripe-js": "^2.2.0",
     "@supabase/auth-helpers-nextjs": "^0.8.7",
     "@supabase/supabase-js": "^2.55.0",
-    "class-variance-authority": "^0.7.0",
-    "clsx": "^2.0.0",
     "dotenv": "^17.2.1",
     "lucide-react": "^0.294.0",
     "next": "^14.2.31",
     "react": "^18",
     "react-dom": "^18",
-    "stripe": "^14.7.0",
-    "tailwind-merge": "^2.0.0"
+    "stripe": "^14.7.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.39.0",
