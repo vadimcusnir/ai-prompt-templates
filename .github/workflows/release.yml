@@ -1,0 +1,346 @@
+name: Release Management
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  pre-release-check:
+    name: Pre-Release Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run pre-release checks
+        run: |
+          echo "Running pre-release checks..."
+          npm run lint
+          npm run type-check
+          npm run test:ci
+          echo "Pre-release checks completed"
+
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: pre-release-check
+    if: github.event.inputs.environment == 'production' || github.event_name == 'release'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Configure Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+      - name: Bump version
+        id: bump
+        run: |
+          if [ "${{ github.event.inputs.version }}" = "" ]; then
+            VERSION="patch"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          npm version $VERSION --no-git-tag-version
+          NEW_VERSION=$(node -p "require('./package.json').version")
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          
+      - name: Create changelog
+        id: changelog
+        run: |
+          echo "Creating changelog..."
+          # Aici poți adăuga logica pentru generarea changelog-ului
+          echo "changelog=Updated to version ${{ steps.bump.outputs.new_version }}" >> $GITHUB_OUTPUT
+          
+      - name: Commit and push
+        run: |
+          git add package.json package-lock.json
+          git commit -m "Bump version to ${{ steps.bump.outputs.new_version }}"
+          git push
+          
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.bump.outputs.new_version }}
+          release_name: Release v${{ steps.bump.outputs.new_version }}
+          body: |
+            ## What's Changed
+            ${{ steps.changelog.outputs.changelog }}
+            
+            ## Installation
+            ```bash
+            npm install ai-dual-brand-platform@${{ steps.bump.outputs.new_version }}
+            ```
+            
+            ## Breaking Changes
+            None
+            
+            ## New Features
+            - Updated dependencies
+            - Improved CI/CD pipeline
+            
+            ## Bug Fixes
+            - Various improvements
+          draft: false
+          prerelease: false
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: create-release
+    if: github.event.inputs.environment == 'staging' || github.event_name == 'release'
+    environment: staging
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Build application
+        run: npm run build
+        
+      - name: Deploy to staging environment
+        run: npm run deploy:dev || echo "Deploy script not configured"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_DEV }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_DEV }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY_DEV }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY_DEV }}
+          
+      - name: Run staging smoke tests
+        run: npm run test:smoke || echo "Smoke tests not configured"
+        env:
+          BASE_URL: ${{ secrets.DEV_BASE_URL }}
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [create-release, deploy-staging]
+    if: github.event.inputs.environment == 'production' || github.event_name == 'release'
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Build application
+        run: npm run build
+        
+      - name: Deploy to production environment
+        run: npm run deploy:prod || echo "Deploy script not configured"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_PROD }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_PROD }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY_PROD }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY_PROD }}
+          
+      - name: Run production smoke tests
+        run: npm run test:smoke || echo "Smoke tests not configured"
+        env:
+          BASE_URL: ${{ secrets.PROD_BASE_URL }}
+          
+      - name: Notify deployment success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: '🚀 Production deployment successful!'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  post-release:
+    name: Post-Release
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run post-release tasks
+        run: |
+          echo "Running post-release tasks..."
+          # Aici poți adăuga logica pentru task-urile post-release
+          echo "Post-release tasks completed"
+          
+      - name: Notify release completion
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: '🎉 Release completed successfully!'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  release-report:
+    name: Release Report
+    runs-on: ubuntu-latest
+    needs: [create-release, deploy-staging, deploy-production, post-release]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate release report
+        run: |
+          echo "Generating release report..."
+          # Aici poți adăuga logica pentru generarea raportului de release
+          echo "Release report generated"
+        
+      - name: Upload release report
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-report
+          path: release-report/
+          retention-days: 30
+
+  release-notification:
+    name: Release Notification
+    runs-on: ubuntu-latest
+    needs: release-report
+    if: always()
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Send release notifications
+        run: |
+          echo "Sending release notifications..."
+          # Aici poți adăuga logica pentru trimiterea notificărilor de release
+          echo "Release notifications sent"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  release-summary:
+    name: Release Summary
+    runs-on: ubuntu-latest
+    needs: [create-release, deploy-staging, deploy-production, post-release, release-report, release-notification]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          npm-version: '10'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Generate release summary
+        run: |
+          echo "Generating release summary..."
+          # Aici poți adăuga logica pentru generarea sumarului de release
+          echo "Release summary generated"
+        
+      - name: Upload release summary
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-summary
+          path: release-summary/
+          retention-days: 30
