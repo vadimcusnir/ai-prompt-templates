@@ -158,7 +158,7 @@ const validators = {
 }
 
 // Validate a single field against a rule
-function validateField(field: string, value: any, rule: ValidationRule, allValues?: Record<string, any>): string | null {
+function validateFieldRule(field: string, value: any, rule: ValidationRule, allValues?: Record<string, any>): string | null {
   // Required check
   if (rule.required) {
     const requiredError = validators.required(value)
@@ -294,7 +294,7 @@ export function useValidation<T extends Record<string, any>>(
       : [validationSchema[field] as ValidationRule]
 
     for (const rule of rules) {
-      const error = validateField(field, value, rule, lastValuesRef.current || undefined)
+      const error = validateFieldRule(field, value, rule, lastValuesRef.current || undefined)
       if (error) {
         return error
       }
@@ -318,7 +318,7 @@ export function useValidation<T extends Record<string, any>>(
       const fieldRules = Array.isArray(rules) ? rules : [rules]
       
       for (const rule of fieldRules) {
-        const error = validateField(field, value, rule, values)
+        const error = validateFieldRule(field, value, rule, values)
         if (error) {
           errors.push({
             field,
@@ -380,20 +380,27 @@ export function useValidation<T extends Record<string, any>>(
 
   // Mark field as touched
   const markFieldAsTouched = useCallback((field: string) => {
-    setState(prev => ({
-      ...prev,
-      touched: new Set([...prev.touched, field]),
-      isDirty: true
-    }))
+    setState(prev => {
+      const newTouched = new Set(prev.touched)
+      newTouched.add(field)
+      return {
+        ...prev,
+        touched: newTouched,
+        isDirty: true
+      }
+    })
   }, [])
 
   // Mark all fields as touched
   const markAllFieldsAsTouched = useCallback(() => {
-    setState(prev => ({
-      ...prev,
-      touched: new Set(Object.keys(schemaRef.current || {})),
-      isDirty: true
-    }))
+    setState(prev => {
+      const newTouched = new Set(Object.keys(schemaRef.current || {}))
+      return {
+        ...prev,
+        touched: newTouched,
+        isDirty: true
+      }
+    })
   }, [])
 
   // Reset validation state

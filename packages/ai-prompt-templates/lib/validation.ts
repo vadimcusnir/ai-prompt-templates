@@ -61,8 +61,8 @@ export const PromptSchema = z.object({
       feature.length >= 3 && feature.length <= 500 && !feature.includes('<script')
     ), 'Anti-surface features contain invalid content'),
   
-  required_tier: z.enum(['explorer', 'architect', 'initiate', 'master'])
-    .default('explorer'),
+  required_tier: z.enum(['free', 'explorer', 'architect', 'initiate', 'master', 'elite'])
+    .default('free'),
   
   is_published: z.boolean().default(false),
   
@@ -104,7 +104,7 @@ export const AuthSchema = z.object({
 
 // Schema pentru Stripe checkout
 export const StripeCheckoutSchema = z.object({
-  tier: z.enum(['explorer', 'architect', 'initiate', 'master']),
+  tier: z.enum(['free', 'explorer', 'architect', 'initiate', 'master', 'elite']),
   userId: z.string().uuid('Invalid user ID format')
 })
 
@@ -118,7 +118,7 @@ export const SearchSchema = z.object({
     'consciousness_mapping',
     'advanced_systems'
   ]).optional(),
-  tier: z.enum(['explorer', 'architect', 'initiate', 'master']).default('explorer'),
+  tier: z.enum(['free', 'explorer', 'architect', 'initiate', 'master', 'elite']).default('free'),
   difficulty: z.enum(['foundation', 'advanced', 'expert', 'architect']).optional(),
   minPrice: z.number().int().min(0).optional(),
   maxPrice: z.number().int().min(0).optional(),

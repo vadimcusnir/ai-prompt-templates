@@ -5,7 +5,7 @@ if (!process.env.STRIPE_SECRET_KEY) {
 }
 
 export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: '2025-07-30.basil',
+  apiVersion: '2023-10-16',
   typescript: true,
 });
 
@@ -38,13 +38,13 @@ export const TIER_DESCRIPTIONS = {
 
 export const TIER_FEATURES = {
   free: [
-    '10% din librăria completă',
-    'Framework-uri de bază',
+    '10% of complete library',
+    'Basic Frameworks',
     'Community Access',
     'Email Support'
   ],
   architect: [
-    '40% din librăria completă',
+    '40% of complete library',
     '200+ Advanced Frameworks',
     'Interactive Templates',
     'Priority Community Access',
@@ -52,7 +52,7 @@ export const TIER_FEATURES = {
     'Advanced Search & Filters'
   ],
   initiate: [
-    '70% din librăria completă',
+    '70% of complete library',
     '500+ Professional Frameworks',
     'Custom Template Builder',
     'VIP Community Access',
@@ -61,7 +61,7 @@ export const TIER_FEATURES = {
     'Framework Analytics'
   ],
   elite: [
-    '100% din librăria completă',
+    '100% of complete library',
     'Exclusive Elite Content',
     'Personal AI Assistant Integration',
     '1-on-1 Consultation Sessions',

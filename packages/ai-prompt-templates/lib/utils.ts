@@ -5,46 +5,50 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+// Client-side utility functions that don't access server environment variables
+
+export function formatPrice(cents: number): string {
+  return `€${(cents / 100).toFixed(2)}`;
+}
+
+export function formatCurrency(amount: number, currency: string = 'EUR'): string {
+  return new Intl.NumberFormat('de-DE', {
+    style: 'currency',
+    currency: currency,
+  }).format(amount / 100);
+}
+
 export function formatDate(date: string | Date): string {
   const d = new Date(date);
   return d.toLocaleDateString('ro-RO', {
     year: 'numeric',
     month: 'long',
-    day: 'numeric',
+    day: 'numeric'
   });
 }
 
 export function formatDateTime(date: string | Date): string {
   const d = new Date(date);
-  return d.toLocaleString('ro-RO', {
+  return d.toLocaleDateString('ro-RO', {
     year: 'numeric',
     month: 'long',
     day: 'numeric',
     hour: '2-digit',
-    minute: '2-digit',
+    minute: '2-digit'
   });
-}
-
-export function formatPrice(cents: number, currency = 'EUR'): string {
-  if (cents === 0) return 'Gratuit';
-  return new Intl.NumberFormat('ro-RO', {
-    style: 'currency',
-    currency,
-  }).format(cents / 100);
 }
 
 export function truncateText(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;
-  return text.slice(0, maxLength) + '...';
+  return text.substring(0, maxLength) + '...';
 }
 
-export function generateSlug(text: string): string {
+export function slugify(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .trim();
+    .replace(/[^\w\s-]/g, '')
+    .replace(/[\s_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 export function debounce<T extends (...args: any[]) => any>(

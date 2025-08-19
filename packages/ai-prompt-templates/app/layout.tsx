@@ -2,7 +2,7 @@ import type { Metadata } from 'next'
 import { Inter } from 'next/font/google'
 import './globals.css'
 import { AuthProvider } from '@/contexts/AuthContext'
-import { Provider as ChakraProvider } from '@/components/ui/provider'
+import { Provider } from '@/components/ui/provider'
 import Navigation from '@/components/Navigation'
 import CookieConsent from '@/components/CookieConsent'
 
@@ -20,14 +20,30 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              // Dezactivează service worker-ul care cauzează probleme
+              if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                  for(let registration of registrations) {
+                    registration.unregister();
+                  }
+                });
+              }
+            `,
+          }}
+        />
+      </head>
       <body className={inter.className}>
-        <ChakraProvider>
+        <Provider>
           <AuthProvider>
             <Navigation />
             {children}
             <CookieConsent />
           </AuthProvider>
-        </ChakraProvider>
+        </Provider>
       </body>
     </html>
   )

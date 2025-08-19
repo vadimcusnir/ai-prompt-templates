@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useDebounce } from './useDebounce'
-import { logger, logSearch } from '@/lib/analytics'
+import { logger, logInfo } from '@/lib/logger'
 
 export interface SearchFilters {
   query: string
@@ -100,7 +100,7 @@ export function useSearch<T>(options: UseSearchOptions<T> = {}) {
 
     try {
       // Track search analytics
-      logSearch({
+      logInfo('Search performed', {
         query: searchFilters.query,
         filters: searchFilters,
         page,

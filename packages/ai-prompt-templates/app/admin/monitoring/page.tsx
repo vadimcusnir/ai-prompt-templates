@@ -56,7 +56,7 @@ export default function MonitoringPage() {
 
   // Check admin access
   useEffect(() => {
-    if (user && userTier !== 'admin') {
+    if (user && userTier !== 'elite') {
       window.location.href = '/403'
     }
   }, [user, userTier])
@@ -118,7 +118,7 @@ export default function MonitoringPage() {
     fetchMetrics()
   }, [])
 
-  if (!user || userTier !== 'admin') {
+  if (!user || userTier !== 'elite') {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">

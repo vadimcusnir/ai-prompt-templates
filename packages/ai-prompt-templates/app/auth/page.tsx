@@ -1,42 +1,17 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAuth } from '@/contexts/AuthContext'
 import { LoginForm } from '@/components/auth/LoginForm'
 import { RegisterForm } from '@/components/auth/RegisterForm'
 
 export default function AuthPage() {
   const [mode, setMode] = useState<'login' | 'register'>('login')
-  const { user, loading } = useAuth()
   const router = useRouter()
 
-  useEffect(() => {
-    if (user && !loading) {
-      router.push('/dashboard')
-    }
-  }, [user, loading, router])
-
-  if (loading) {
-    return (
-      <div style={{ 
-        minHeight: '100vh', 
-        display: 'flex', 
-        alignItems: 'center', 
-        justifyContent: 'center',
-        backgroundColor: '#f8fafc'
-      }}>
-        <div>Loading...</div>
-      </div>
-    )
-  }
-
-  if (user) {
-    return null // Will redirect to dashboard
-  }
-
   const handleSuccess = () => {
-    router.push('/dashboard')
+    // For now, just show a message
+    alert('Authentication would be implemented here')
   }
 
   return (

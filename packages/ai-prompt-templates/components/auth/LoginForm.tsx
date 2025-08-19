@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { useAuth } from '@/contexts/AuthContext'
 
 interface LoginFormProps {
   onSuccess?: () => void
@@ -13,23 +12,21 @@ export function LoginForm({ onSuccess, onToggleMode }: LoginFormProps) {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  
-  const { signIn } = useAuth()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
     setError('')
 
-    const result = await signIn(email, password)
-    
-    if (result.error) {
-      setError(result.error)
-    } else {
-      onSuccess?.()
-    }
-    
-    setLoading(false)
+    // Simulate login
+    setTimeout(() => {
+      if (email && password) {
+        onSuccess?.()
+      } else {
+        setError('Please fill in all fields')
+      }
+      setLoading(false)
+    }, 1000)
   }
 
   return (
@@ -135,39 +132,39 @@ export function LoginForm({ onSuccess, onToggleMode }: LoginFormProps) {
             padding: '0.75rem',
             backgroundColor: loading ? '#9ca3af' : '#3b82f6',
             color: 'white',
-            fontSize: '1rem',
-            fontWeight: '500',
             border: 'none',
             borderRadius: '0.5rem',
+            fontSize: '1rem',
+            fontWeight: '500',
             cursor: loading ? 'not-allowed' : 'pointer',
             transition: 'background-color 0.2s'
           }}
         >
           {loading ? 'Signing In...' : 'Sign In'}
         </button>
-      </form>
 
-      {onToggleMode && (
-        <div style={{ textAlign: 'center', marginTop: '1.5rem' }}>
-          <span style={{ fontSize: '0.875rem', color: '#6b7280' }}>
-            Don&apos;t have an account?{' '}
-          </span>
+        <div style={{ 
+          textAlign: 'center', 
+          marginTop: '1rem',
+          fontSize: '0.875rem',
+          color: '#6b7280'
+        }}>
+          Don&apos;t have an account?{' '}
           <button
+            type="button"
             onClick={onToggleMode}
             style={{
               background: 'none',
               border: 'none',
               color: '#3b82f6',
-              fontSize: '0.875rem',
-              fontWeight: '500',
               cursor: 'pointer',
               textDecoration: 'underline'
             }}
           >
-            Sign Up
+            Sign up
           </button>
         </div>
-      )}
+      </form>
     </div>
   )
 }

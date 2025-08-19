@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { logger, logPerformance } from '@/lib/analytics'
+import { logger, logPerformance } from '@/lib/logger'
 
 export interface PerformanceMetrics {
   // Core Web Vitals
@@ -100,7 +100,7 @@ export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}
 
     // Report to analytics if enabled
     if (reportToAnalytics) {
-      logPerformance('component_mount', { mountTime })
+      logPerformance('component_mount', mountTime, { mountTime })
     }
   }, [enabled, reportToAnalytics, logToConsole])
 
@@ -114,7 +114,7 @@ export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}
     }
 
     if (reportToAnalytics) {
-      logPerformance('component_render', { renderTime })
+      logPerformance('component_render', renderTime, { renderTime })
     }
 
     // Check threshold
@@ -145,7 +145,7 @@ export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}
               }
 
               if (reportToAnalytics) {
-                logPerformance('fcp', { fcp })
+                logPerformance('fcp', fcp, { fcp })
               }
 
               // Check threshold
@@ -173,7 +173,7 @@ export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}
             }
 
             if (reportToAnalytics) {
-              logPerformance('lcp', { lcp })
+              logPerformance('lcp', lcp, { lcp })
             }
 
             if (lcp > finalThresholds.lcp && onThresholdExceeded) {
@@ -201,9 +201,9 @@ export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}
             console.log(`CLS: ${clsValue}`)
           }
 
-          if (reportToAnalytics) {
-            logPerformance('cls', { cls: clsValue })
-          }
+                        if (reportToAnalytics) {
+                logPerformance('cls', clsValue, { cls: clsValue })
+              }
 
           if (clsValue > finalThresholds.cls && onThresholdExceeded) {
             onThresholdExceeded('cls', clsValue, finalThresholds.cls)
@@ -218,19 +218,22 @@ export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}
         const fidObserver = new PerformanceObserver((list) => {
           const entries = list.getEntries()
           entries.forEach((entry) => {
-            const fid = entry.processingStart - entry.startTime
-            setMetrics(prev => ({ ...prev, fid }))
+            if (entry.entryType === 'first-input') {
+              const eventEntry = entry as PerformanceEventTiming
+              const fid = eventEntry.processingStart - eventEntry.startTime
+              setMetrics(prev => ({ ...prev, fid }))
 
-            if (logToConsole) {
-              console.log(`FID: ${fid}ms`)
-            }
+              if (logToConsole) {
+                console.log(`FID: ${fid}ms`)
+              }
 
-            if (reportToAnalytics) {
-              logPerformance('fid', { fid })
-            }
+              if (reportToAnalytics) {
+                logPerformance('fid', fid, { fid })
+              }
 
-            if (fid > finalThresholds.fid && onThresholdExceeded) {
-              onThresholdExceeded('fid', fid, finalThresholds.fid)
+              if (fid > finalThresholds.fid && onThresholdExceeded) {
+                onThresholdExceeded('fid', fid, finalThresholds.fid)
+              }
             }
           })
         })
@@ -249,9 +252,9 @@ export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}
             console.log(`TTFB: ${ttfb}ms`)
           }
 
-          if (reportToAnalytics) {
-            logPerformance('ttfb', { ttfb })
-          }
+                      if (reportToAnalytics) {
+              logPerformance('ttfb', ttfb, { ttfb })
+            }
 
           if (ttfb > finalThresholds.ttfb && onThresholdExceeded) {
             onThresholdExceeded('ttfb', ttfb, finalThresholds.ttfb)
@@ -324,9 +327,9 @@ export function usePerformanceMonitor(options: UsePerformanceMonitorOptions = {}
       console.log(`${interactionName} interaction took ${interactionTime}ms`)
     }
 
-    if (reportToAnalytics) {
-      logPerformance('interaction', { interactionName, interactionTime })
-    }
+            if (reportToAnalytics) {
+          logPerformance('interaction', interactionTime, { interactionName, interactionTime })
+        }
 
     // Reset render start time for next interaction
     renderStartTime.current = Date.now()

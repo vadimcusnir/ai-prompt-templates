@@ -1,11 +1,12 @@
 'use client'
 
 import { createContext, useContext, useEffect, useState, useCallback } from 'react'
-import { createClientSideClient } from '@/lib/supabase'
+import { supabase } from '@/lib/supabase/client'
 import { User } from '@supabase/supabase-js'
 import { logger, logSecurity, logError } from '@/lib/logger'
+import { type PlanTier } from '@/lib/plans'
 
-type UserTier = 'free' | 'architect' | 'initiate' | 'elite' | 'admin'
+type UserTier = PlanTier
 
 type AuthContextType = {
   user: User | null
@@ -13,6 +14,7 @@ type AuthContextType = {
   userTier: UserTier
   signIn: (email: string, password: string) => Promise<{ error?: string }>
   signUp: (email: string, password: string) => Promise<{ error?: string }>
+  signInWithGoogle: () => Promise<{ error?: string }>
   signOut: () => Promise<void>
   refreshUserTier: () => Promise<void>
 }
@@ -24,7 +26,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [userTier, setUserTier] = useState<UserTier>('free')
   
-  const supabase = createClientSideClient()
+
 
   const getUserTier = useCallback(async (userId: string) => {
     try {
@@ -56,22 +58,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [supabase])
 
   useEffect(() => {
+    console.log('🔍 AuthContext useEffect triggered')
+    console.log('🔍 Supabase client:', supabase)
+    
     // Get initial session
     const getInitialSession = async () => {
       try {
+        console.log('🔍 Getting initial session...')
         const { data: { session }, error } = await supabase.auth.getSession()
         
         if (error) {
+          console.error('❌ Error getting session:', error)
           logError('Error getting session', { error: error.message })
         } else {
+          console.log('✅ Session retrieved:', session)
           setUser(session?.user ?? null)
           if (session?.user) {
             await getUserTier(session.user.id)
           }
         }
       } catch (error) {
+        console.error('❌ Session error:', error)
         logError('Session error', { error: error instanceof Error ? error.message : 'Unknown error' })
       } finally {
+        console.log('🔍 Setting loading to false')
         setLoading(false)
       }
     }
@@ -99,7 +109,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     )
 
     return () => subscription.unsubscribe()
-  }, [getUserTier, supabase.auth])
+  }, [getUserTier])
 
   const signIn = async (email: string, password: string) => {
     try {
@@ -169,6 +179,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
+  const signInWithGoogle = async () => {
+    try {
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`
+        }
+      })
+
+      if (error) {
+        logError('Google sign in failed', { error: error.message })
+        return { error: error.message }
+      }
+
+      logger.info('Google sign in initiated successfully')
+      return {}
+    } catch (error) {
+      logError('Unexpected error during Google sign in', { 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      })
+      return { error: 'An unexpected error occurred' }
+    }
+  }
+
   const signOut = async () => {
     try {
       const { error } = await supabase.auth.signOut()
@@ -199,6 +233,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     userTier,
     signIn,
     signUp,
+    signInWithGoogle,
     signOut,
     refreshUserTier,
   }

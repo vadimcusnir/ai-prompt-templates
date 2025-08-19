@@ -1,0 +1,7 @@
+export { default as TrialBadge } from './TrialBadge'
+export { default as MoneyBackGuarantee } from './MoneyBackGuarantee'
+export { default as EnterpriseContact } from './EnterpriseContact'
+export { default as UsageExamples } from './UsageExamples'
+export { default as CustomerTestimonials } from './CustomerTestimonials'
+export { default as IntegrationDetails } from './IntegrationDetails'
+export { default as SupportAndSLA } from './SupportAndSLA'

@@ -1,9 +1,82 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase-server'
-import { getAccessibleContent } from '@/lib/access-gating'
+import { getAccessibleContent, type AccessTier } from '@/lib/access-gating'
 import { withRateLimit, RATE_LIMIT_CONFIGS } from '@/lib/rate-limit'
 import { validateAndSanitize, PromptSchema, SearchSchema } from '@/lib/validation'
 import { logger, logSecurity, logError } from '@/lib/logger'
+
+// Mock data pentru dezvoltare - va fi înlocuit cu tabela prompts în producție
+const MOCK_PROMPTS: Array<{
+  id: number
+  title: string
+  slug: string
+  preview_content: string
+  full_content: string
+  cognitive_category: string
+  required_tier: AccessTier
+  quality_score: number
+  digital_root: number
+  is_published: boolean
+  created_at: string
+  updated_at: string
+}> = [
+  {
+    id: 1,
+    title: 'Cognitive Depth Analysis Framework',
+    slug: 'cognitive-depth-analysis-framework',
+    preview_content: 'Advanced framework for analyzing cognitive depth in AI responses with multi-layered assessment capabilities',
+    full_content: 'This comprehensive framework provides systematic approaches to evaluate and enhance the cognitive depth of AI-generated content...',
+    cognitive_category: 'deep_analysis',
+    required_tier: 'master',
+    quality_score: 9,
+    digital_root: 2,
+    is_published: true,
+    created_at: '2024-12-15T10:00:00Z',
+    updated_at: '2024-12-15T10:00:00Z'
+  },
+  {
+    id: 2,
+    title: 'Consciousness Mapping Protocol',
+    slug: 'consciousness-mapping-protocol',
+    preview_content: 'Framework for mapping consciousness patterns in AI interactions and self-awareness',
+    full_content: 'This protocol enables systematic mapping of consciousness patterns in AI systems...',
+    cognitive_category: 'consciousness_mapping',
+    required_tier: 'architect',
+    quality_score: 10,
+    digital_root: 2,
+    is_published: true,
+    created_at: '2024-12-14T10:00:00Z',
+    updated_at: '2024-12-14T10:00:00Z'
+  },
+  {
+    id: 3,
+    title: 'Meaning Engineering System',
+    slug: 'meaning-engineering-system',
+    preview_content: 'Systematic approach to engineering meaning in AI prompts through progressive concept building',
+    full_content: 'This system provides structured methods for building meaningful AI interactions...',
+    cognitive_category: 'meaning_engineering',
+    required_tier: 'initiate',
+    quality_score: 7,
+    digital_root: 2,
+    is_published: true,
+    created_at: '2024-12-13T10:00:00Z',
+    updated_at: '2024-12-13T10:00:00Z'
+  },
+  {
+    id: 4,
+    title: 'Advanced Systems Integration',
+    slug: 'advanced-systems-integration',
+    preview_content: 'Comprehensive framework for integrating multiple AI systems with cognitive coherence',
+    full_content: 'This framework enables seamless integration of multiple AI systems...',
+    cognitive_category: 'advanced_systems',
+    required_tier: 'master',
+    quality_score: 8,
+    digital_root: 2,
+    is_published: true,
+    created_at: '2024-12-12T10:00:00Z',
+    updated_at: '2024-12-12T10:00:00Z'
+  }
+]
 
 // Rate limiting pentru endpoint-ul de prompt-uri
 const rateLimitedHandler = withRateLimit(RATE_LIMIT_CONFIGS.api, (request: NextRequest) => {
@@ -15,19 +88,24 @@ const rateLimitedHandler = withRateLimit(RATE_LIMIT_CONFIGS.api, (request: NextR
   const startTime = Date.now()
   
   try {
-    const supabase = createServiceClient()
+    // Pentru dezvoltare, folosim mock data
+    // În producție, va fi înlocuit cu:
+    // const supabase = createServiceClient()
+    // const { searchParams } = new URL(request.url)
+    // let query = supabase.from('prompts').select('*').eq('is_published', true)
+    
     const { searchParams } = new URL(request.url)
     
     const category = searchParams.get('category')
     const search = searchParams.get('search')
-    const tier = searchParams.get('tier') as 'explorer' | 'architect' | 'initiate' | 'master' || 'explorer'
+    const tier = (searchParams.get('tier') as AccessTier) || 'free'
 
     // Validare parametri de căutare
     const searchValidation = validateAndSanitize(SearchSchema, {
-      search,
-      category,
-      tier,
-      difficulty: searchParams.get('difficulty'),
+      search: search || undefined,
+      category: category || undefined,
+      tier: tier || 'free',
+      difficulty: searchParams.get('difficulty') || undefined,
       minPrice: searchParams.get('minPrice') ? parseInt(searchParams.get('minPrice')!) : undefined,
       maxPrice: searchParams.get('maxPrice') ? parseInt(searchParams.get('maxPrice')!) : undefined,
       minScore: searchParams.get('minScore') ? parseInt(searchParams.get('minScore')!) : undefined,
@@ -46,28 +124,23 @@ const rateLimitedHandler = withRateLimit(RATE_LIMIT_CONFIGS.api, (request: NextR
       }, { status: 400 })
     }
 
-    let query = supabase
-      .from('prompts')
-      .select('*')
-      .eq('is_published', true)
+    // Filtrare mock data
+    let filteredPrompts = [...MOCK_PROMPTS]
 
     if (category) {
-      query = query.eq('cognitive_category', category)
+      filteredPrompts = filteredPrompts.filter(prompt => prompt.cognitive_category === category)
     }
 
     if (search) {
-      query = query.textSearch('title,preview_content', search)
-    }
-
-    const { data: prompts, error } = await query.order('created_at', { ascending: false })
-
-    if (error) {
-      logError('Database query failed', { error: error.message, query: 'prompts select' })
-      return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+      const searchLower = search.toLowerCase()
+      filteredPrompts = filteredPrompts.filter(prompt => 
+        prompt.title.toLowerCase().includes(searchLower) ||
+        prompt.preview_content.toLowerCase().includes(searchLower)
+      )
     }
 
     // Apply access gating
-    const accessiblePrompts = prompts?.map(prompt => {
+    const accessiblePrompts = filteredPrompts.map(prompt => {
       const { content, hasFullAccess } = getAccessibleContent(
         prompt.full_content,
         tier,
@@ -80,7 +153,10 @@ const rateLimitedHandler = withRateLimit(RATE_LIMIT_CONFIGS.api, (request: NextR
         hasFullAccess,
         full_content: hasFullAccess ? prompt.full_content : undefined
       }
-    }) || []
+    })
+
+    // Simulează o întârziere pentru a imita un API real
+    await new Promise(resolve => setTimeout(resolve, 100))
 
     const duration = Date.now() - startTime
     logger.performance('GET /api/prompts', duration, { 
@@ -113,7 +189,9 @@ export const POST = withRateLimit(RATE_LIMIT_CONFIGS.api, (request: NextRequest)
   const startTime = Date.now()
   
   try {
-    const supabase = createServiceClient()
+    // Pentru dezvoltare, simulăm crearea unui prompt
+    // În producție, va fi înlocuit cu:
+    // const supabase = createServiceClient()
     
     // Verificare Content-Type
     const contentType = request.headers.get('content-type')
@@ -158,27 +236,21 @@ export const POST = withRateLimit(RATE_LIMIT_CONFIGS.api, (request: NextRequest)
       quality_score: sanitizedData.quality_score || 5
     }
     
-    const { data, error } = await supabase
-      .from('prompts')
-      .insert(dataToInsert)
-      .select()
-      .single()
-
-    if (error) {
-      logError('Database insert failed', { 
-        error: error.message, 
-        data: { title: sanitizedData.title, category: sanitizedData.cognitive_category }
-      })
-      return NextResponse.json({ error: 'Failed to create prompt' }, { status: 500 })
+    // Simulează crearea unui prompt nou
+    const newPrompt = {
+      id: MOCK_PROMPTS.length + 1,
+      ...dataToInsert,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     }
 
     const duration = Date.now() - startTime
     logger.performance('POST /api/prompts', duration, { 
-      promptId: data.id,
-      title: data.title
+      promptId: newPrompt.id,
+      title: newPrompt.title
     })
 
-    return NextResponse.json({ prompt: data }, { status: 201 })
+    return NextResponse.json({ prompt: newPrompt }, { status: 201 })
 
   } catch (error) {
     const duration = Date.now() - startTime

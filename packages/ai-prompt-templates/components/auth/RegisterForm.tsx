@@ -1,8 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { useAuth } from '@/contexts/AuthContext'
-import ProtectedRoute from '@/components/ProtectedRoute'
 
 interface RegisterFormProps {
   onToggleMode?: () => void
@@ -15,8 +13,6 @@ export function RegisterForm({ onToggleMode }: RegisterFormProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
-  
-  const { signUp } = useAuth()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -36,19 +32,15 @@ export function RegisterForm({ onToggleMode }: RegisterFormProps) {
       return
     }
 
-    const result = await signUp(email, password)
-    
-    if (result.error) {
-      if (result.error.includes('email')) {
-        setSuccess('Please check your email to confirm your account')
+    // Simulate registration
+    setTimeout(() => {
+      if (email && password) {
+        setSuccess('Account created successfully! Please check your email to confirm.')
       } else {
-        setError(result.error)
+        setError('Please fill in all fields')
       }
-    } else {
-      setSuccess('Account created successfully! Please check your email to confirm.')
-    }
-    
-    setLoading(false)
+      setLoading(false)
+    }, 1000)
   }
 
   return (

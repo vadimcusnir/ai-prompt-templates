@@ -1,17 +1,21 @@
-export type AccessTier = 'explorer' | 'architect' | 'initiate' | 'master'
+export type AccessTier = 'free' | 'explorer' | 'architect' | 'initiate' | 'master' | 'elite'
 
 export const TIER_HIERARCHY: Record<AccessTier, number> = {
+  free: 0,
   explorer: 1,
   architect: 2,
   initiate: 3,
-  master: 4
+  master: 4,
+  elite: 5
 }
 
 export const PREVIEW_PERCENTAGES: Record<AccessTier, number> = {
+  free: 10,
   explorer: 20,
   architect: 40,
   initiate: 70,
-  master: 100
+  master: 90,
+  elite: 100
 }
 
 export function getAccessibleContent(
@@ -46,10 +50,12 @@ export function getTierUpgradeMessage(userTier: AccessTier, requiredTier: Access
   }
   
   const tierNames = {
+    free: 'Free',
     explorer: 'Explorer',
     architect: 'Architect', 
     initiate: 'Initiate',
-    master: 'Master'
+    master: 'Master',
+    elite: 'Elite'
   }
   
   return `🔒 Upgrade to ${tierNames[requiredTier]} tier to access this content`
@@ -57,6 +63,11 @@ export function getTierUpgradeMessage(userTier: AccessTier, requiredTier: Access
 
 export function getTierBenefits(userTier: AccessTier): string[] {
   const benefits = {
+    free: [
+      'Access to basic cognitive frameworks',
+      '10% preview of advanced content',
+      'Community access'
+    ],
     explorer: [
       'Access to basic cognitive frameworks',
       '20% preview of advanced content',
@@ -76,14 +87,21 @@ export function getTierBenefits(userTier: AccessTier): string[] {
       'Priority support'
     ],
     master: [
+      'Access to advanced frameworks',
+      '90% preview of elite content',
+      'VIP community access',
+      'Live workshops',
+      'Priority support'
+    ],
+    elite: [
       'Unlimited access to all content',
       '100% content access',
-      'Exclusive master-level frameworks',
+      'Exclusive elite-level frameworks',
       '1-on-1 consultation sessions',
       'Custom framework development',
       'White-label solutions'
     ]
   }
   
-  return benefits[userTier] || benefits.explorer
+  return benefits[userTier] || benefits.free
 }

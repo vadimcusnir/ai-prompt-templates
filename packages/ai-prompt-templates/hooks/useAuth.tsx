@@ -4,8 +4,9 @@ import { createContext, useContext, useEffect, useState, useCallback } from 'rea
 import { createClientSideClient } from '@/lib/supabase'
 import { User } from '@supabase/supabase-js'
 import { logger, logSecurity, logError } from '@/lib/logger'
+import { type PlanTier } from '@/lib/plans'
 
-export type UserTier = 'free' | 'architect' | 'initiate' | 'elite' | 'admin'
+export type UserTier = PlanTier
 
 export type AuthContextType = {
   user: User | null

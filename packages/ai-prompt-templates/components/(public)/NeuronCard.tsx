@@ -4,7 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/hooks/useAuth';
 import { LockIcon, UnlockIcon, StarIcon, TagIcon } from 'lucide-react';
-import { Neuron } from '@/hooks/useNeurons';
+import { Neuron } from '@/hooks/types';
 
 interface NeuronCardProps {
   neuron: Neuron;

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { useRouter } from 'next/navigation'
 import ProtectedRoute from '@/components/ProtectedRoute'
-import { formatPrice } from '@/lib/stripe'
+import { formatPrice } from '@/lib/utils'
 
 interface UserPrompt {
   id: string

@@ -66,7 +66,8 @@ export async function rateLimit(
 // Cleanup expired entries every hour
 setInterval(() => {
   const now = Date.now();
-  for (const [key, value] of rateLimitStore.entries()) {
+  const entries = Array.from(rateLimitStore.entries());
+  for (const [key, value] of entries) {
     if (value.resetTime < now) {
       rateLimitStore.delete(key);
     }
